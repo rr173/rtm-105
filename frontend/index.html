@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>可视化工作流状态机设计器</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>🎯 可视化工作流状态机设计器</h1>
+    <div class="topbar-actions">
+      <button id="btn-new" class="btn">新建状态机</button>
+      <button id="btn-publish" class="btn btn-primary">发布状态机</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="canvas-section">
+      <div class="canvas-toolbar">
+        <span class="canvas-title" id="current-name">未命名状态机</span>
+        <span class="canvas-hint">双击空白处创建状态节点 | 从节点边缘拖拽到另一节点创建转换</span>
+      </div>
+      <div class="canvas-wrapper">
+        <canvas id="canvas"></canvas>
+      </div>
+      <div class="instance-panel" id="instance-panel">
+        <h3>实例操作</h3>
+        <div id="instance-controls" style="display:none;">
+          <button id="btn-create-instance" class="btn btn-sm">创建实例</button>
+          <div class="send-event">
+            <input type="text" id="event-name" placeholder="事件名 (如 approve)">
+            <input type="text" id="event-payload" placeholder='payload JSON (如 {"amount":100})'>
+            <button id="btn-send-event" class="btn btn-sm btn-primary">发送事件</button>
+          </div>
+          <div id="instance-list"></div>
+          <div id="instance-detail"></div>
+        </div>
+        <div id="no-instance-hint">请选择右侧已发布的状态机查看实例</div>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <h3>已发布的状态机</h3>
+        <div id="machine-list" class="machine-list"></div>
+      </div>
+      <div class="sidebar-section" id="edit-section" style="display:none;">
+        <h3>编辑选中项</h3>
+        <div id="edit-panel"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="flash-layer" class="flash-layer"></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

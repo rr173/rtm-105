@@ -4,6 +4,13 @@ node_modules/
 # 系统文件
 .DS_Store
 
+# 数据库
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # 训练记录
 训练记录.md
 *.xlsx
