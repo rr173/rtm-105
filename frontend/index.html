@@ -12,6 +12,7 @@
     <div class="topbar-actions">
       <button id="btn-new" class="btn">新建状态机</button>
       <button id="btn-publish" class="btn btn-primary">发布状态机</button>
+      <button id="btn-open-market" class="btn">📦 模板市场</button>
     </div>
   </header>
 
@@ -53,6 +54,72 @@
   </main>
 
   <div id="flash-layer" class="flash-layer"></div>
+
+  <div id="template-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>📦 状态机模板市场</h2>
+        <button id="btn-close-market" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-tabs">
+        <button class="tab-btn active" data-tab="browse">浏览模板</button>
+        <button class="tab-btn" data-tab="publish">发布为模板</button>
+      </div>
+
+      <div class="tab-content" id="tab-browse">
+        <div class="market-toolbar">
+          <input type="text" id="tpl-search" placeholder="🔍 搜索模板名称或描述...">
+          <select id="tpl-sort">
+            <option value="recent">最新发布</option>
+            <option value="popular">最受欢迎</option>
+          </select>
+          <select id="tpl-tag-filter">
+            <option value="">全部标签</option>
+          </select>
+        </div>
+        <div id="template-list" class="template-grid"></div>
+      </div>
+
+      <div class="tab-content" id="tab-publish" style="display:none;">
+        <div class="publish-form">
+          <div class="form-group">
+            <label>选择要发布的状态机</label>
+            <select id="publish-machine-select">
+              <option value="">-- 请选择 --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>模板描述</label>
+            <textarea id="publish-description" rows="4" placeholder="介绍一下这个模板的用途和特点..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>标签 (用逗号分隔)</label>
+            <input type="text" id="publish-tags" placeholder="如: 审批,HR,工作流">
+          </div>
+          <button id="btn-submit-publish" class="btn btn-primary" style="width:100%;margin-top:10px;">发布模板</button>
+        </div>
+      </div>
+
+      <div id="template-preview" class="template-preview" style="display:none;">
+        <div class="preview-header">
+          <button id="btn-back-list">&larr; 返回列表</button>
+          <h3 id="preview-name"></h3>
+        </div>
+        <div class="preview-info">
+          <div id="preview-tags"></div>
+          <div id="preview-meta"></div>
+          <div id="preview-description" class="preview-description"></div>
+        </div>
+        <div class="preview-canvas-wrap">
+          <canvas id="preview-canvas" width="800" height="350"></canvas>
+        </div>
+        <div class="preview-actions">
+          <button id="btn-clone-template" class="btn btn-primary">一键克隆到我的状态机</button>
+          <button id="btn-delete-template" class="btn btn-danger" style="display:none;">删除此模板</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="js/app.js"></script>
 </body>

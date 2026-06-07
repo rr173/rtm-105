@@ -302,6 +302,169 @@ app.post('/api/instances/:id/send', async (req, res) => {
   }
 });
 
+function rowToTemplate(row, includeDefinition = false) {
+  const tpl = {
+    id: row.id,
+    machineId: row.machine_id,
+    name: row.name,
+    description: row.description,
+    tags: JSON.parse(row.tags_json || '[]'),
+    cloneCount: row.clone_count,
+    createdAt: row.created_at
+  };
+  if (includeDefinition) {
+    tpl.definition = JSON.parse(row.definition_json);
+  }
+  return tpl;
+}
+
+app.post('/api/templates', async (req, res) => {
+  try {
+    const { machineId, description, tags } = req.body;
+
+    if (!machineId) {
+      return res.status(400).json({ error: 'machineId is required' });
+    }
+
+    const existingTpl = await get('SELECT id FROM templates WHERE machine_id = ?', [machineId]);
+    if (existingTpl) {
+      return res.status(409).json({ error: 'Template for this machine already exists. Delete it first to republish.' });
+    }
+
+    const machine = await getMachineById(machineId);
+    if (!machine) {
+      return res.status(404).json({ error: 'Machine not found' });
+    }
+
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const tagsArr = Array.isArray(tags) ? tags : [];
+
+    await run(
+      'INSERT INTO templates (id, machine_id, name, description, tags_json, definition_json, clone_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        id,
+        machineId,
+        machine.name,
+        description || '',
+        JSON.stringify(tagsArr),
+        JSON.stringify(machine.definition),
+        0,
+        now
+      ]
+    );
+
+    const row = await get('SELECT * FROM templates WHERE id = ?', [id]);
+    res.json(rowToTemplate(row, true));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/templates', async (req, res) => {
+  try {
+    const { search, tag, sort } = req.query;
+
+    let sql = 'SELECT * FROM templates WHERE 1=1';
+    const params = [];
+
+    if (search) {
+      sql += ' AND (name LIKE ? OR description LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    let rows = await all(sql, params);
+    let templates = rows.map(r => rowToTemplate(r, false));
+
+    if (tag) {
+      templates = templates.filter(t => t.tags.includes(tag));
+    }
+
+    if (sort === 'popular') {
+      templates.sort((a, b) => b.cloneCount - a.cloneCount);
+    } else {
+      templates.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    }
+
+    res.json(templates);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/templates/:id', async (req, res) => {
+  try {
+    const row = await get('SELECT * FROM templates WHERE id = ?', [req.params.id]);
+    if (!row) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    res.json(rowToTemplate(row, true));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/templates/:id', async (req, res) => {
+  try {
+    const row = await get('SELECT id FROM templates WHERE id = ?', [req.params.id]);
+    if (!row) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    await run('DELETE FROM templates WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/templates/:id/clone', async (req, res) => {
+  try {
+    const tplRow = await get('SELECT * FROM templates WHERE id = ?', [req.params.id]);
+    if (!tplRow) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    const template = rowToTemplate(tplRow, true);
+    const overrideName = req.body && req.body.name;
+    const newName = overrideName || (template.name + '_copy');
+
+    const idMap = new Map();
+    const newStates = template.definition.states.map(s => {
+      const newId = uuidv4();
+      idMap.set(s.id, newId);
+      return { ...s, id: newId };
+    });
+    const newTransitions = template.definition.transitions.map(t => ({
+      ...t,
+      id: uuidv4(),
+      sourceStateId: idMap.get(t.sourceStateId) || t.sourceStateId,
+      targetStateId: idMap.get(t.targetStateId) || t.targetStateId
+    }));
+
+    const existing = await get('SELECT MAX(version) as v FROM machines WHERE name = ?', [newName]);
+    const version = existing && existing.v ? existing.v + 1 : 1;
+
+    const newMachineId = uuidv4();
+    const now = new Date().toISOString();
+    const definition = JSON.stringify({ states: newStates, transitions: newTransitions });
+
+    await run(
+      'INSERT INTO machines (id, name, version, created_at, definition) VALUES (?, ?, ?, ?, ?)',
+      [newMachineId, newName, version, now, definition]
+    );
+
+    await run(
+      'UPDATE templates SET clone_count = clone_count + 1 WHERE id = ?',
+      [req.params.id]
+    );
+
+    const machine = await getMachineById(newMachineId);
+    res.json(machine);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 async function start() {
   try {
     await initDB();

@@ -71,8 +71,20 @@ function initDB() {
           FOREIGN KEY (instance_id) REFERENCES instances(id)
         );
 
+        CREATE TABLE IF NOT EXISTS templates (
+          id TEXT PRIMARY KEY,
+          machine_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT,
+          tags_json TEXT NOT NULL,
+          definition_json TEXT NOT NULL,
+          clone_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_instances_machine ON instances(machine_id);
         CREATE INDEX IF NOT EXISTS idx_transitions_instance ON transitions(instance_id);
+        CREATE INDEX IF NOT EXISTS idx_templates_machine ON templates(machine_id);
       `, (err) => {
         if (err) reject(err);
         else resolve();

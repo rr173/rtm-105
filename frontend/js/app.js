@@ -47,6 +47,10 @@ class WorkflowApp {
     
     this.ws = null;
     
+    this.templates = [];
+    this.selectedTemplate = null;
+    this.previewCtx = null;
+    
     this.init();
   }
   
@@ -102,6 +106,373 @@ class WorkflowApp {
     document.getElementById('btn-publish').addEventListener('click', () => this.publishMachine());
     document.getElementById('btn-create-instance').addEventListener('click', () => this.createInstance());
     document.getElementById('btn-send-event').addEventListener('click', () => this.sendEvent());
+    this.bindTemplateMarketEvents();
+  }
+
+  bindTemplateMarketEvents() {
+    document.getElementById('btn-open-market').addEventListener('click', () => this.openTemplateMarket());
+    document.getElementById('btn-close-market').addEventListener('click', () => this.closeTemplateMarket());
+    document.getElementById('template-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'template-modal') this.closeTemplateMarket();
+    });
+
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.switchTab(btn.dataset.tab));
+    });
+
+    document.getElementById('tpl-search').addEventListener('input', () => this.loadTemplates());
+    document.getElementById('tpl-sort').addEventListener('change', () => this.loadTemplates());
+    document.getElementById('tpl-tag-filter').addEventListener('change', () => this.loadTemplates());
+
+    document.getElementById('btn-submit-publish').addEventListener('click', () => this.submitPublishTemplate());
+
+    document.getElementById('btn-back-list').addEventListener('click', () => this.showTemplateList());
+    document.getElementById('btn-clone-template').addEventListener('click', () => this.cloneTemplate());
+    document.getElementById('btn-delete-template').addEventListener('click', () => this.deleteTemplate());
+  }
+
+  openTemplateMarket() {
+    document.getElementById('template-modal').style.display = 'flex';
+    this.switchTab('browse');
+    this.populatePublishMachineSelect();
+    this.loadTemplates();
+  }
+
+  closeTemplateMarket() {
+    document.getElementById('template-modal').style.display = 'none';
+    this.showTemplateList();
+  }
+
+  switchTab(tabName) {
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tab === tabName);
+    });
+    document.getElementById('tab-browse').style.display = tabName === 'browse' ? 'block' : 'none';
+    document.getElementById('tab-publish').style.display = tabName === 'publish' ? 'block' : 'none';
+    document.getElementById('template-preview').style.display = 'none';
+    if (tabName === 'browse') {
+      this.loadTemplates();
+    } else {
+      this.populatePublishMachineSelect();
+    }
+  }
+
+  populatePublishMachineSelect() {
+    const sel = document.getElementById('publish-machine-select');
+    if (this.machines.length === 0) {
+      sel.innerHTML = '<option value="">-- 暂无可发布的状态机，请先发布状态机 --</option>';
+      return;
+    }
+    sel.innerHTML = '<option value="">-- 请选择 --</option>' +
+      this.machines.map(m => `<option value="${m.id}">${m.name} (v${m.version})</option>`).join('');
+  }
+
+  async loadTemplates() {
+    try {
+      const search = document.getElementById('tpl-search').value.trim();
+      const sort = document.getElementById('tpl-sort').value;
+      const tag = document.getElementById('tpl-tag-filter').value;
+
+      const params = new URLSearchParams();
+      if (search) params.set('search', search);
+      if (sort) params.set('sort', sort);
+      if (tag) params.set('tag', tag);
+
+      const res = await fetch(API_BASE + '/api/templates' + (params.toString() ? '?' + params.toString() : ''));
+      this.templates = await res.json();
+      this.renderTemplateList();
+      this.updateTagFilterOptions();
+    } catch (e) {
+      toast('加载模板列表失败', 'error');
+    }
+  }
+
+  updateTagFilterOptions() {
+    const allTags = new Set();
+    for (const t of this.templates) {
+      for (const tag of t.tags) allTags.add(tag);
+    }
+    const sel = document.getElementById('tpl-tag-filter');
+    const currentVal = sel.value;
+    sel.innerHTML = '<option value="">全部标签</option>' +
+      [...allTags].map(t => `<option value="${t}">${t}</option>`).join('');
+    sel.value = currentVal;
+  }
+
+  renderTemplateList() {
+    const container = document.getElementById('template-list');
+    if (this.templates.length === 0) {
+      container.innerHTML = '<div style="text-align:center;color:#8c8c8c;padding:40px;grid-column:1/-1;">暂无匹配的模板</div>';
+      return;
+    }
+    container.innerHTML = this.templates.map(t => `
+      <div class="template-card" data-id="${t.id}">
+        <div class="template-card-name">${t.name}</div>
+        <div class="template-card-desc">${t.description || '暂无描述'}</div>
+        <div class="template-card-tags">
+          ${t.tags.map(tag => `<span class="template-tag">${tag}</span>`).join('')}
+        </div>
+        <div class="template-card-meta">
+          <span>📅 ${new Date(t.createdAt).toLocaleDateString()}</span>
+          <span>👥 克隆 ${t.cloneCount} 次</span>
+        </div>
+      </div>
+    `).join('');
+    container.querySelectorAll('.template-card').forEach(el => {
+      el.onclick = () => this.showTemplatePreview(el.dataset.id);
+    });
+  }
+
+  async showTemplatePreview(id) {
+    try {
+      const res = await fetch(API_BASE + '/api/templates/' + id);
+      const tpl = await res.json();
+      this.selectedTemplate = tpl;
+
+      document.getElementById('tab-browse').style.display = 'none';
+      document.getElementById('tab-publish').style.display = 'none';
+      document.getElementById('template-preview').style.display = 'flex';
+
+      document.getElementById('preview-name').textContent = tpl.name;
+      document.getElementById('preview-tags').innerHTML = tpl.tags.map(tag =>
+        `<span class="template-tag" style="font-size:12px;padding:3px 10px;">${tag}</span>`
+      ).join('');
+      document.getElementById('preview-meta').innerHTML = `
+        <span style="color:#8c8c8c;font-size:12px;">
+          📅 发布于 ${new Date(tpl.createdAt).toLocaleString()} &nbsp;|&nbsp;
+          👥 已被克隆 ${tpl.cloneCount} 次 &nbsp;|&nbsp;
+          🔗 源状态机: ${tpl.machineId.slice(0, 8)}…
+        </span>
+      `;
+      document.getElementById('preview-description').textContent = tpl.description || '暂无描述';
+
+      const isMyTemplate = this.machines.some(m => m.id === tpl.machineId);
+      document.getElementById('btn-delete-template').style.display = isMyTemplate ? 'inline-block' : 'none';
+
+      this.renderPreviewCanvas(tpl.definition);
+    } catch (e) {
+      toast('加载模板详情失败', 'error');
+    }
+  }
+
+  showTemplateList() {
+    document.getElementById('template-preview').style.display = 'none';
+    const activeTab = document.querySelector('.tab-btn.active').dataset.tab;
+    document.getElementById('tab-browse').style.display = activeTab === 'browse' ? 'block' : 'none';
+    document.getElementById('tab-publish').style.display = activeTab === 'publish' ? 'block' : 'none';
+    this.selectedTemplate = null;
+  }
+
+  renderPreviewCanvas(definition) {
+    const canvas = document.getElementById('preview-canvas');
+    const ctx = canvas.getContext('2d');
+    this.previewCtx = ctx;
+
+    let maxX = 0, maxY = 0;
+    for (const s of definition.states) {
+      maxX = Math.max(maxX, s.x + STATE_WIDTH + 40);
+      maxY = Math.max(maxY, s.y + STATE_HEIGHT + 40);
+    }
+    canvas.width = Math.max(800, maxX);
+    canvas.height = Math.max(300, maxY);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (const t of definition.transitions) {
+      const from = definition.states.find(s => s.id === t.sourceStateId);
+      const to = definition.states.find(s => s.id === t.targetStateId);
+      if (!from || !to) continue;
+      const p1 = this.getEdgePointStatic(from, to);
+      const p2 = this.getEdgePointStatic(to, from);
+      this.drawArrowStatic(ctx, p1.x, p1.y, p2.x, p2.y, '#8c8c8c', false, 2);
+      const midX = (p1.x + p2.x) / 2;
+      const midY = (p1.y + p2.y) / 2;
+      const label = t.guard ? `${t.event} [${t.guard}]` : t.event;
+      ctx.font = '11px sans-serif';
+      const labelWidth = ctx.measureText(label).width;
+      const padX = 6, padY = 3;
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.strokeStyle = '#8c8c8c';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(midX - labelWidth / 2 - padX, midY - 8 - padY, labelWidth + padX * 2, 16 + padY * 2, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#262626';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, midX, midY);
+    }
+
+    for (const s of definition.states) {
+      this.drawStateStatic(ctx, s);
+    }
+  }
+
+  getEdgePointStatic(from, to) {
+    const cx1 = from.x + STATE_WIDTH / 2;
+    const cy1 = from.y + STATE_HEIGHT / 2;
+    const cx2 = to.x + STATE_WIDTH / 2;
+    const cy2 = to.y + STATE_HEIGHT / 2;
+    const angle = Math.atan2(cy2 - cy1, cx2 - cx1);
+    const hw = STATE_WIDTH / 2;
+    const hh = STATE_HEIGHT / 2;
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    let scale;
+    if (Math.abs(dx) * hh > Math.abs(dy) * hw) {
+      scale = hw / Math.abs(dx);
+    } else {
+      scale = hh / Math.abs(dy);
+    }
+    return { x: cx1 + dx * scale, y: cy1 + dy * scale };
+  }
+
+  drawArrowStatic(ctx, x1, y1, x2, y2, color, dashed, lineWidth = 2) {
+    const headLen = 10;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const angle = Math.atan2(dy, dx);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    if (dashed) ctx.setLineDash([5, 5]);
+    else ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
+    ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  drawStateStatic(ctx, s) {
+    const x = s.x, y = s.y, w = STATE_WIDTH, h = STATE_HEIGHT;
+    let fillColor = '#ffffff';
+    let strokeColor = '#d9d9d9';
+    let lineWidth = 2;
+    if (s.isFinal) fillColor = '#f6ffed';
+    ctx.fillStyle = fillColor;
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = lineWidth;
+    ctx.beginPath();
+    ctx.moveTo(x + STATE_RADIUS, y);
+    ctx.lineTo(x + w - STATE_RADIUS, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + STATE_RADIUS);
+    ctx.lineTo(x + w, y + h - STATE_RADIUS);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - STATE_RADIUS, y + h);
+    ctx.lineTo(x + STATE_RADIUS, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - STATE_RADIUS);
+    ctx.lineTo(x, y + STATE_RADIUS);
+    ctx.quadraticCurveTo(x, y, x + STATE_RADIUS, y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    if (s.isFinal) {
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x + 4 + (STATE_RADIUS - 2), y + 4);
+      ctx.lineTo(x + w - 4 - (STATE_RADIUS - 2), y + 4);
+      ctx.quadraticCurveTo(x + w - 4, y + 4, x + w - 4, y + 4 + (STATE_RADIUS - 2));
+      ctx.lineTo(x + w - 4, y + h - 4 - (STATE_RADIUS - 2));
+      ctx.quadraticCurveTo(x + w - 4, y + h - 4, x + w - 4 - (STATE_RADIUS - 2), y + h - 4);
+      ctx.lineTo(x + 4 + (STATE_RADIUS - 2), y + h - 4);
+      ctx.quadraticCurveTo(x + 4, y + h - 4, x + 4, y + h - 4 - (STATE_RADIUS - 2));
+      ctx.lineTo(x + 4, y + 4 + (STATE_RADIUS - 2));
+      ctx.quadraticCurveTo(x + 4, y + 4, x + 4 + (STATE_RADIUS - 2), y + 4);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    if (s.isInitial) {
+      ctx.fillStyle = '#52c41a';
+      ctx.beginPath();
+      ctx.arc(x - 10, y + h / 2, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#1a1a2e';
+      ctx.font = '10px sans-serif';
+      ctx.fillText('初始', x - 30, y + h / 2 + 3);
+    }
+    ctx.fillStyle = '#262626';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(s.name, x + w / 2, y + h / 2);
+  }
+
+  async submitPublishTemplate() {
+    const machineId = document.getElementById('publish-machine-select').value;
+    const description = document.getElementById('publish-description').value.trim();
+    const tagsStr = document.getElementById('publish-tags').value.trim();
+    const tags = tagsStr ? tagsStr.split(/[,，]/).map(s => s.trim()).filter(Boolean) : [];
+
+    if (!machineId) {
+      toast('请选择要发布的状态机', 'error');
+      return;
+    }
+
+    try {
+      const res = await fetch(API_BASE + '/api/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ machineId, description, tags })
+      });
+      if (!res.ok) {
+        if (res.status === 409) throw new Error('该状态机已发布为模板，可先删除再重新发布');
+        throw new Error((await res.json()).error);
+      }
+      toast('模板发布成功!', 'success');
+      document.getElementById('publish-description').value = '';
+      document.getElementById('publish-tags').value = '';
+      this.switchTab('browse');
+    } catch (e) {
+      toast('发布失败: ' + e.message, 'error');
+    }
+  }
+
+  async cloneTemplate() {
+    if (!this.selectedTemplate) return;
+    const defaultName = this.selectedTemplate.name + '_copy';
+    const name = prompt('请输入克隆后的状态机名称:', defaultName);
+    if (name === null) return;
+
+    try {
+      const res = await fetch(API_BASE + '/api/templates/' + this.selectedTemplate.id + '/clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name || undefined })
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      const newMachine = await res.json();
+      toast(`克隆成功! 新状态机: ${newMachine.name}`, 'success');
+      this.closeTemplateMarket();
+      await this.loadMachines();
+      await this.loadMachine(newMachine.id);
+    } catch (e) {
+      toast('克隆失败: ' + e.message, 'error');
+    }
+  }
+
+  async deleteTemplate() {
+    if (!this.selectedTemplate) return;
+    if (!confirm('确定要删除此模板吗？删除后无法恢复。')) return;
+
+    try {
+      const res = await fetch(API_BASE + '/api/templates/' + this.selectedTemplate.id, {
+        method: 'DELETE'
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      toast('模板已删除', 'success');
+      this.showTemplateList();
+      await this.loadTemplates();
+    } catch (e) {
+      toast('删除失败: ' + e.message, 'error');
+    }
   }
   
   getCanvasPos(e) {
