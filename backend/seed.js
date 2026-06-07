@@ -1,5 +1,82 @@
 const { run, get, all } = require('./db');
 const { v4: uuidv4 } = require('uuid');
+const { recordStateDuration } = require('./metrics');
+
+async function createInstanceWithHistory(machineId, states, path, baseTime) {
+  const sMap = new Map();
+  for (const s of states) sMap.set(s.name, s);
+
+  let currentTime = baseTime;
+  const instanceId = uuidv4();
+  const initialState = sMap.get(path[0].state);
+
+  await run(
+    'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final, entered_state_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [
+      instanceId,
+      machineId,
+      sMap.get(path[path.length - 1].state).id,
+      JSON.stringify(path[path.length - 1].context || {}),
+      new Date(baseTime).toISOString(),
+      sMap.get(path[path.length - 1].state).isFinal ? 1 : 0,
+      new Date(currentTime).toISOString()
+    ]
+  );
+
+  let prevState = null;
+  let prevEnteredAt = baseTime;
+  let prevStep = null;
+
+  for (let i = 0; i < path.length; i++) {
+    const step = path[i];
+    const state = sMap.get(step.state);
+    const enteredAt = currentTime;
+
+    if (step.durationMs) {
+      currentTime += step.durationMs;
+    }
+
+    if (prevState && prevStep) {
+      const transitionId = uuidv4();
+      await run(
+        'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          transitionId,
+          instanceId,
+          prevState.id,
+          state.id,
+          prevStep.event || 'submit',
+          JSON.stringify(prevStep.payload || {}),
+          new Date(enteredAt).toISOString(),
+          prevStep.triggeredBy || 'user'
+        ]
+      );
+      await recordStateDuration(
+        instanceId,
+        machineId,
+        prevState.id,
+        new Date(prevEnteredAt).toISOString(),
+        new Date(enteredAt).toISOString()
+      );
+    }
+
+    if (state.isFinal) {
+      await recordStateDuration(
+        instanceId,
+        machineId,
+        state.id,
+        new Date(enteredAt).toISOString(),
+        new Date(enteredAt).toISOString()
+      );
+    }
+
+    prevState = state;
+    prevEnteredAt = enteredAt;
+    prevStep = step;
+  }
+
+  return instanceId;
+}
 
 async function seedDemoData() {
   const row = await get('SELECT COUNT(*) as cnt FROM machines');
@@ -7,6 +84,7 @@ async function seedDemoData() {
 
   const now = new Date().toISOString();
   let orderMachineId = null;
+  let orderStates = null;
 
   if (row.cnt === 0) {
     const s1 = { id: uuidv4(), name: '待提交', isInitial: true, isFinal: false, x: 60, y: 180 };
@@ -20,7 +98,7 @@ async function seedDemoData() {
     const s6 = { id: uuidv4(), name: '复审批准', isInitial: false, isFinal: true, x: 600, y: 60 };
     const s7 = { id: uuidv4(), name: '复审拒绝', isInitial: false, isFinal: true, x: 600, y: 300 };
 
-    const states = [s1, s2, s3, s4, s5, s6, s7];
+    orderStates = [s1, s2, s3, s4, s5, s6, s7];
 
     const transitions = [
       { id: uuidv4(), sourceStateId: s1.id, targetStateId: s2.id, event: 'submit', guard: '' },
@@ -33,44 +111,112 @@ async function seedDemoData() {
     ];
 
     orderMachineId = uuidv4();
-    const definition = JSON.stringify({ states, transitions });
+    const definition = JSON.stringify({ states: orderStates, transitions });
 
     await run(
       'INSERT INTO machines (id, name, version, created_at, definition) VALUES (?, ?, ?, ?, ?)',
       [orderMachineId, '订单审批', 1, now, definition]
     );
 
-    const inst1Id = uuidv4();
-    await run(
-      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final, entered_state_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [inst1Id, orderMachineId, s2.id, JSON.stringify({ orderId: 'ORD-001', amount: 2000 }), now, 0, now]
-    );
+    const baseTime = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-    const h1 = uuidv4();
-    await run(
-      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [h1, inst1Id, s1.id, s2.id, 'submit', JSON.stringify({ amount: 2000, reason: '创建订单' }), now, 'user']
-    );
+    const demoPaths = [
+      {
+        path: [
+          { state: '待提交', durationMs: 5 * 60 * 1000, event: 'submit', payload: { amount: 1500 } },
+          { state: '待审批', durationMs: 45 * 60 * 1000, event: 'approve', payload: { amount: 1500, approvedBy: 'manager_a' } },
+          { state: '已批准', context: { orderId: 'ORD-DEMO-001', amount: 1500 } }
+        ],
+        offsetMs: 0
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 2 * 60 * 1000, event: 'submit', payload: { amount: 800 } },
+          { state: '待审批', durationMs: 2 * 60 * 60 * 1000, event: 'approve', payload: { amount: 800, approvedBy: 'manager_b' } },
+          { state: '已批准', context: { orderId: 'ORD-DEMO-002', amount: 800 } }
+        ],
+        offsetMs: 3 * 60 * 60 * 1000
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 10 * 60 * 1000, event: 'submit', payload: { amount: 3200 } },
+          { state: '待审批', durationMs: 30 * 60 * 1000, event: 'approve', payload: { amount: 3200, approvedBy: 'manager_a' } },
+          { state: '已批准', context: { orderId: 'ORD-DEMO-003', amount: 3200 } }
+        ],
+        offsetMs: 6 * 60 * 60 * 1000
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 3 * 60 * 1000, event: 'submit', payload: { amount: 500 } },
+          { state: '待审批', durationMs: 90 * 60 * 1000, event: 'reject', payload: { reason: '资料不全' } },
+          { state: '已拒绝', context: { orderId: 'ORD-DEMO-004', amount: 500 } }
+        ],
+        offsetMs: 10 * 60 * 60 * 1000
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 8 * 60 * 1000, event: 'submit', payload: { amount: 1200 } },
+          { state: '待审批', durationMs: 3 * 60 * 60 * 1000, event: 'reject', payload: { reason: '预算不足' } },
+          { state: '已拒绝', context: { orderId: 'ORD-DEMO-005', amount: 1200 } }
+        ],
+        offsetMs: 15 * 60 * 60 * 1000
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 15 * 60 * 1000, event: 'submit', payload: { amount: 8000 } },
+          { state: '待审批', durationMs: 15 * 60 * 1000, event: 'approve', payload: { amount: 8000, approvedBy: 'manager_a' } },
+          { state: '人工复审', durationMs: 4 * 60 * 60 * 1000, event: 'approve', payload: { approvedBy: 'director' } },
+          { state: '复审批准', context: { orderId: 'ORD-DEMO-006', amount: 8000 } }
+        ],
+        offsetMs: 20 * 60 * 60 * 1000
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 20 * 60 * 1000, event: 'submit', payload: { amount: 12000 } },
+          { state: '待审批', durationMs: 10 * 60 * 1000, event: 'approve', payload: { amount: 12000, approvedBy: 'manager_c' } },
+          { state: '人工复审', durationMs: 6 * 60 * 60 * 1000, event: 'approve', payload: { approvedBy: 'vp' } },
+          { state: '复审批准', context: { orderId: 'ORD-DEMO-007', amount: 12000 } }
+        ],
+        offsetMs: 30 * 60 * 60 * 1000
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 4 * 60 * 1000, event: 'submit', payload: { amount: 15000 } },
+          { state: '待审批', durationMs: 25 * 60 * 1000, event: 'approve', payload: { amount: 15000, approvedBy: 'manager_b' } },
+          { state: '人工复审', durationMs: 2 * 60 * 60 * 1000, event: 'reject', payload: { reason: '风险过高' } },
+          { state: '复审拒绝', context: { orderId: 'ORD-DEMO-008', amount: 15000 } }
+        ],
+        offsetMs: 45 * 60 * 60 * 1000
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 6 * 60 * 1000, event: 'submit', payload: { amount: 20000 } },
+          { state: '待审批', durationMs: 5 * 60 * 1000, event: 'approve', payload: { amount: 20000, approvedBy: 'manager_a' } },
+          { state: '人工复审', durationMs: 8 * 60 * 60 * 1000, event: 'reject', payload: { reason: '不符合政策' } },
+          { state: '复审拒绝', context: { orderId: 'ORD-DEMO-009', amount: 20000 } }
+        ],
+        offsetMs: 60 * 60 * 60 * 1000
+      },
+      {
+        path: [
+          { state: '待提交', durationMs: 1 * 60 * 1000, event: 'submit', payload: { amount: 4500 } },
+          { state: '待审批', durationMs: 15 * 60 * 1000, event: 'approve', payload: { amount: 4500, approvedBy: 'manager_c' } },
+          { state: '已批准', context: { orderId: 'ORD-DEMO-010', amount: 4500 } }
+        ],
+        offsetMs: 80 * 60 * 60 * 1000
+      }
+    ];
 
-    const inst2Id = uuidv4();
-    await run(
-      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final, entered_state_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [inst2Id, orderMachineId, s3.id, JSON.stringify({ orderId: 'ORD-002', amount: 1500 }), now, 1, now]
-    );
+    for (const demo of demoPaths) {
+      await createInstanceWithHistory(
+        orderMachineId,
+        orderStates,
+        demo.path,
+        baseTime + demo.offsetMs
+      );
+    }
 
-    const h2 = uuidv4();
-    await run(
-      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [h2, inst2Id, s1.id, s2.id, 'submit', JSON.stringify({ amount: 1500 }), now, 'user']
-    );
-
-    const h3 = uuidv4();
-    await run(
-      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [h3, inst2Id, s2.id, s3.id, 'approve', JSON.stringify({ amount: 1500, approvedBy: 'manager' }), now, 'user']
-    );
-
-    console.log('Demo data seeded: 订单审批 state machine and 2 demo instances created.');
+    console.log('Demo data seeded: 订单审批 state machine and 10 completed demo instances created.');
   } else {
     const mRow = await get('SELECT id FROM machines WHERE name = ?', ['订单审批']);
     if (mRow) orderMachineId = mRow.id;

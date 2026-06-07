@@ -106,9 +106,24 @@ function initDB() {
           created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS state_durations (
+          id TEXT PRIMARY KEY,
+          instance_id TEXT NOT NULL,
+          machine_id TEXT NOT NULL,
+          state_id TEXT NOT NULL,
+          entered_at TEXT NOT NULL,
+          left_at TEXT,
+          duration_ms INTEGER,
+          FOREIGN KEY (instance_id) REFERENCES instances(id),
+          FOREIGN KEY (machine_id) REFERENCES machines(id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_instances_machine ON instances(machine_id);
         CREATE INDEX IF NOT EXISTS idx_transitions_instance ON transitions(instance_id);
         CREATE INDEX IF NOT EXISTS idx_templates_machine ON templates(machine_id);
+        CREATE INDEX IF NOT EXISTS idx_state_durations_machine ON state_durations(machine_id);
+        CREATE INDEX IF NOT EXISTS idx_state_durations_instance ON state_durations(instance_id);
+        CREATE INDEX IF NOT EXISTS idx_state_durations_entered ON state_durations(entered_at);
       `, async (err) => {
         if (err) return reject(err);
         try {

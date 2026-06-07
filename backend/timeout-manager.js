@@ -1,6 +1,7 @@
 const { all, get, run } = require('./db');
 const { v4: uuidv4 } = require('uuid');
 const { evaluateGuard } = require('./guard');
+const { recordStateDuration } = require('./metrics');
 
 const activeTimers = new Map();
 
@@ -102,6 +103,11 @@ async function sendTimeoutEvent(instanceId, timeoutConfig) {
     'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     [transitionId, row.id, currentStateId, targetState.id, event, JSON.stringify(payload || {}), now, 'timeout']
   );
+
+  await recordStateDuration(row.id, row.machine_id, currentStateId, row.entered_state_at || row.created_at, now);
+  if (targetState.isFinal) {
+    await recordStateDuration(row.id, row.machine_id, targetState.id, now, now);
+  }
 
   clearInstanceTimeout(instanceId);
 

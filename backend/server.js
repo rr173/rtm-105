@@ -7,6 +7,13 @@ const { run, get, all, initDB } = require('./db');
 const { evaluateGuard } = require('./guard');
 const { seedDemoData } = require('./seed');
 const {
+  parseTimeFilter,
+  getStateHeatmap,
+  getTransitionFrequency,
+  getInstanceLifecycle,
+  recordStateDuration
+} = require('./metrics');
+const {
   scheduleTimeout,
   clearInstanceTimeout,
   rebuildAllTimers,
@@ -208,6 +215,10 @@ app.post('/api/machines/:machineId/instances', async (req, res) => {
       [id, machine.id, initialState.id, JSON.stringify(context), now, initialState.isFinal ? 1 : 0, now]
     );
 
+    if (initialState.isFinal) {
+      await recordStateDuration(id, machine.id, initialState.id, now, now);
+    }
+
     if (!initialState.isFinal && initialState.timeout) {
       scheduleTimeout(id, initialState.timeout, now);
     }
@@ -317,6 +328,11 @@ app.post('/api/instances/:id/send', async (req, res) => {
       'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [transitionId, row.id, currentStateId, targetState.id, event, JSON.stringify(payload || {}), now, 'user']
     );
+
+    await recordStateDuration(row.id, row.machine_id, currentStateId, row.entered_state_at || row.created_at, now);
+    if (targetState.isFinal) {
+      await recordStateDuration(row.id, row.machine_id, targetState.id, now, now);
+    }
 
     clearInstanceTimeout(row.id);
     if (!targetState.isFinal && targetState.timeout) {
@@ -513,6 +529,57 @@ app.post('/api/templates/:id/clone', async (req, res) => {
 
     const machine = await getMachineById(newMachineId);
     res.json(machine);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/metrics/state-heatmap', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const timeFilter = parseTimeFilter(req);
+    const data = await getStateHeatmap(req.params.machineId, timeFilter);
+    res.json({
+      machineId: req.params.machineId,
+      machineName: machine.name,
+      timeFilter,
+      states: data || []
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/metrics/transition-frequency', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const timeFilter = parseTimeFilter(req);
+    const data = await getTransitionFrequency(req.params.machineId, timeFilter);
+    res.json({
+      machineId: req.params.machineId,
+      machineName: machine.name,
+      timeFilter,
+      transitions: data || []
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/metrics/lifecycle', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const timeFilter = parseTimeFilter(req);
+    const data = await getInstanceLifecycle(req.params.machineId, timeFilter);
+    res.json({
+      machineId: req.params.machineId,
+      machineName: machine.name,
+      timeFilter,
+      ...data
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
