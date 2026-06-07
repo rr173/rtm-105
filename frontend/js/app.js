@@ -10,6 +10,16 @@ function uid() {
   return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
 }
 
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function toast(msg, type = 'info') {
   const el = document.createElement('div');
   el.className = 'toast toast-' + type;
@@ -164,7 +174,7 @@ class WorkflowApp {
       return;
     }
     sel.innerHTML = '<option value="">-- 请选择 --</option>' +
-      this.machines.map(m => `<option value="${m.id}">${m.name} (v${m.version})</option>`).join('');
+      this.machines.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)} (v${m.version})</option>`).join('');
   }
 
   async loadTemplates() {
@@ -195,7 +205,7 @@ class WorkflowApp {
     const sel = document.getElementById('tpl-tag-filter');
     const currentVal = sel.value;
     sel.innerHTML = '<option value="">全部标签</option>' +
-      [...allTags].map(t => `<option value="${t}">${t}</option>`).join('');
+      [...allTags].map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
     sel.value = currentVal;
   }
 
@@ -206,11 +216,11 @@ class WorkflowApp {
       return;
     }
     container.innerHTML = this.templates.map(t => `
-      <div class="template-card" data-id="${t.id}">
-        <div class="template-card-name">${t.name}</div>
-        <div class="template-card-desc">${t.description || '暂无描述'}</div>
+      <div class="template-card" data-id="${escapeHtml(t.id)}">
+        <div class="template-card-name">${escapeHtml(t.name)}</div>
+        <div class="template-card-desc">${escapeHtml(t.description || '暂无描述')}</div>
         <div class="template-card-tags">
-          ${t.tags.map(tag => `<span class="template-tag">${tag}</span>`).join('')}
+          ${t.tags.map(tag => `<span class="template-tag">${escapeHtml(tag)}</span>`).join('')}
         </div>
         <div class="template-card-meta">
           <span>📅 ${new Date(t.createdAt).toLocaleDateString()}</span>
@@ -235,13 +245,13 @@ class WorkflowApp {
 
       document.getElementById('preview-name').textContent = tpl.name;
       document.getElementById('preview-tags').innerHTML = tpl.tags.map(tag =>
-        `<span class="template-tag" style="font-size:12px;padding:3px 10px;">${tag}</span>`
+        `<span class="template-tag" style="font-size:12px;padding:3px 10px;">${escapeHtml(tag)}</span>`
       ).join('');
       document.getElementById('preview-meta').innerHTML = `
         <span style="color:#8c8c8c;font-size:12px;">
           📅 发布于 ${new Date(tpl.createdAt).toLocaleString()} &nbsp;|&nbsp;
           👥 已被克隆 ${tpl.cloneCount} 次 &nbsp;|&nbsp;
-          🔗 源状态机: ${tpl.machineId.slice(0, 8)}…
+          🔗 源状态机: ${escapeHtml(tpl.machineId.slice(0, 8))}…
         </span>
       `;
       document.getElementById('preview-description').textContent = tpl.description || '暂无描述';
@@ -921,8 +931,8 @@ class WorkflowApp {
       return;
     }
     list.innerHTML = this.machines.map(m => `
-      <div class="machine-card ${this.selectedMachine === m.id ? 'active' : ''}" data-id="${m.id}">
-        <div class="machine-name">${m.name}</div>
+      <div class="machine-card ${this.selectedMachine === m.id ? 'active' : ''}" data-id="${escapeHtml(m.id)}">
+        <div class="machine-name">${escapeHtml(m.name)}</div>
         <div class="machine-meta">
           <span>v${m.version}</span>
           <span class="badge badge-active">${m.activeInstances} 实例</span>
@@ -940,18 +950,26 @@ class WorkflowApp {
       const m = await res.json();
       this.selectedMachine = id;
       this.currentName = m.name;
-      this.states = m.definition.states.map(s => ({
+      this.states = m.definition.states.map((s, i) => ({
         ...s,
-        x: s.x || 100 + Math.random() * 400,
-        y: s.y || 100 + Math.random() * 300
+        x: typeof s.x === 'number' ? s.x : (100 + i * 180 + Math.random() * 40),
+        y: typeof s.y === 'number' ? s.y : (100 + (i % 2) * 120 + Math.random() * 40)
       }));
-      this.transitions = m.definition.transitions;
+      this.transitions = m.definition.transitions || [];
       this.isDesignMode = false;
       this.clearSelection();
-      this.resizeCanvas();
       this.updateCurrentName();
       this.renderMachineList();
-      
+
+      setTimeout(() => {
+        this.resizeCanvas();
+        const wrapper = this.canvas.parentElement;
+        if (wrapper) {
+          wrapper.scrollLeft = 0;
+          wrapper.scrollTop = 0;
+        }
+      }, 0);
+
       await this.loadInstances();
       this.updateInstancePanel();
       this.connectWS(id);

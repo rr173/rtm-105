@@ -429,10 +429,15 @@ app.post('/api/templates/:id/clone', async (req, res) => {
     const newName = overrideName || (template.name + '_copy');
 
     const idMap = new Map();
-    const newStates = template.definition.states.map(s => {
+    const newStates = template.definition.states.map((s, i) => {
       const newId = uuidv4();
       idMap.set(s.id, newId);
-      return { ...s, id: newId };
+      return {
+        ...s,
+        id: newId,
+        x: typeof s.x === 'number' ? s.x : (60 + i * 200),
+        y: typeof s.y === 'number' ? s.y : (100 + (i % 3) * 100)
+      };
     });
     const newTransitions = template.definition.transitions.map(t => ({
       ...t,
