@@ -73,7 +73,7 @@ app.get('/api/machines', async (req, res) => {
     const rows = await all('SELECT * FROM machines ORDER BY created_at DESC');
     const machines = [];
     for (const row of rows) {
-      const cntRow = await get('SELECT COUNT(*) as cnt FROM instances WHERE machine_id = ?', [row.id]);
+      const cntRow = await get('SELECT COUNT(*) as cnt FROM instances WHERE machine_id = ? AND is_final = 0', [row.id]);
       machines.push({
         id: row.id,
         name: row.name,
@@ -284,7 +284,8 @@ app.post('/api/instances/:id/send', async (req, res) => {
       fromStateId: currentStateId,
       toStateId: targetState.id,
       event,
-      timestamp: now
+      timestamp: now,
+      isFinal: !!isFinal
     };
     broadcastToMachine(row.machine_id, wsMessage);
 

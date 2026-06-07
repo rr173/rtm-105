@@ -604,6 +604,7 @@ class WorkflowApp {
   countInstanceState() {
     this.instanceStates = new Map();
     for (const inst of this.instances) {
+      if (inst.isFinal) continue;
       const count = this.instanceStates.get(inst.currentStateId) || 0;
       this.instanceStates.set(inst.currentStateId, count + 1);
     }
@@ -700,6 +701,9 @@ class WorkflowApp {
     const idx = this.instances.findIndex(i => i.id === msg.instanceId);
     if (idx >= 0) {
       this.instances[idx].currentStateId = msg.toStateId;
+      if (msg.isFinal !== undefined) {
+        this.instances[idx].isFinal = msg.isFinal;
+      }
     }
     this.countInstanceState();
     this.renderInstanceList();
