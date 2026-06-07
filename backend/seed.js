@@ -10,7 +10,10 @@ async function seedDemoData() {
 
   if (row.cnt === 0) {
     const s1 = { id: uuidv4(), name: '待提交', isInitial: true, isFinal: false, x: 60, y: 180 };
-    const s2 = { id: uuidv4(), name: '待审批', isInitial: false, isFinal: false, x: 240, y: 180 };
+    const s2 = {
+      id: uuidv4(), name: '待审批', isInitial: false, isFinal: false, x: 240, y: 180,
+      timeout: { duration: 30, event: 'timeout_reject', payload: { reason: '审批超时自动拒绝' } }
+    };
     const s3 = { id: uuidv4(), name: '已批准', isInitial: false, isFinal: true, x: 420, y: 60 };
     const s4 = { id: uuidv4(), name: '已拒绝', isInitial: false, isFinal: true, x: 420, y: 300 };
     const s5 = { id: uuidv4(), name: '人工复审', isInitial: false, isFinal: false, x: 420, y: 180 };
@@ -24,6 +27,7 @@ async function seedDemoData() {
       { id: uuidv4(), sourceStateId: s2.id, targetStateId: s3.id, event: 'approve', guard: 'payload.amount <= 5000' },
       { id: uuidv4(), sourceStateId: s2.id, targetStateId: s5.id, event: 'approve', guard: 'payload.amount > 5000' },
       { id: uuidv4(), sourceStateId: s2.id, targetStateId: s4.id, event: 'reject', guard: '' },
+      { id: uuidv4(), sourceStateId: s2.id, targetStateId: s4.id, event: 'timeout_reject', guard: '' },
       { id: uuidv4(), sourceStateId: s5.id, targetStateId: s6.id, event: 'approve', guard: '' },
       { id: uuidv4(), sourceStateId: s5.id, targetStateId: s7.id, event: 'reject', guard: '' }
     ];
@@ -38,32 +42,32 @@ async function seedDemoData() {
 
     const inst1Id = uuidv4();
     await run(
-      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final) VALUES (?, ?, ?, ?, ?, ?)',
-      [inst1Id, orderMachineId, s2.id, JSON.stringify({ orderId: 'ORD-001', amount: 2000 }), now, 0]
+      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final, entered_state_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [inst1Id, orderMachineId, s2.id, JSON.stringify({ orderId: 'ORD-001', amount: 2000 }), now, 0, now]
     );
 
     const h1 = uuidv4();
     await run(
-      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [h1, inst1Id, s1.id, s2.id, 'submit', JSON.stringify({ amount: 2000, reason: '创建订单' }), now]
+      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [h1, inst1Id, s1.id, s2.id, 'submit', JSON.stringify({ amount: 2000, reason: '创建订单' }), now, 'user']
     );
 
     const inst2Id = uuidv4();
     await run(
-      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final) VALUES (?, ?, ?, ?, ?, ?)',
-      [inst2Id, orderMachineId, s3.id, JSON.stringify({ orderId: 'ORD-002', amount: 1500 }), now, 1]
+      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final, entered_state_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [inst2Id, orderMachineId, s3.id, JSON.stringify({ orderId: 'ORD-002', amount: 1500 }), now, 1, now]
     );
 
     const h2 = uuidv4();
     await run(
-      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [h2, inst2Id, s1.id, s2.id, 'submit', JSON.stringify({ amount: 1500 }), now]
+      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [h2, inst2Id, s1.id, s2.id, 'submit', JSON.stringify({ amount: 1500 }), now, 'user']
     );
 
     const h3 = uuidv4();
     await run(
-      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [h3, inst2Id, s2.id, s3.id, 'approve', JSON.stringify({ amount: 1500, approvedBy: 'manager' }), now]
+      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [h3, inst2Id, s2.id, s3.id, 'approve', JSON.stringify({ amount: 1500, approvedBy: 'manager' }), now, 'user']
     );
 
     console.log('Demo data seeded: 订单审批 state machine and 2 demo instances created.');

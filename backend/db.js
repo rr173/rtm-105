@@ -38,6 +38,28 @@ function all(sql, params = []) {
   });
 }
 
+function columnExists(tableName, columnName) {
+  return new Promise((resolve, reject) => {
+    db.all(`PRAGMA table_info(${tableName})`, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows.some(r => r.name === columnName));
+    });
+  });
+}
+
+async function migrateDB() {
+  const hasEnteredStateAt = await columnExists('instances', 'entered_state_at');
+  if (!hasEnteredStateAt) {
+    await run('ALTER TABLE instances ADD COLUMN entered_state_at TEXT');
+    console.log('Migrated: added instances.entered_state_at');
+  }
+  const hasTriggeredBy = await columnExists('transitions', 'triggered_by');
+  if (!hasTriggeredBy) {
+    await run('ALTER TABLE transitions ADD COLUMN triggered_by TEXT NOT NULL DEFAULT "user"');
+    console.log('Migrated: added transitions.triggered_by');
+  }
+}
+
 function initDB() {
   return new Promise((resolve, reject) => {
     db.serialize(() => {
@@ -57,6 +79,7 @@ function initDB() {
           context_data TEXT NOT NULL,
           created_at TEXT NOT NULL,
           is_final INTEGER NOT NULL DEFAULT 0,
+          entered_state_at TEXT,
           FOREIGN KEY (machine_id) REFERENCES machines(id)
         );
 
@@ -68,6 +91,7 @@ function initDB() {
           event_name TEXT NOT NULL,
           payload_snapshot TEXT,
           created_at TEXT NOT NULL,
+          triggered_by TEXT NOT NULL DEFAULT "user",
           FOREIGN KEY (instance_id) REFERENCES instances(id)
         );
 
@@ -85,9 +109,14 @@ function initDB() {
         CREATE INDEX IF NOT EXISTS idx_instances_machine ON instances(machine_id);
         CREATE INDEX IF NOT EXISTS idx_transitions_instance ON transitions(instance_id);
         CREATE INDEX IF NOT EXISTS idx_templates_machine ON templates(machine_id);
-      `, (err) => {
-        if (err) reject(err);
-        else resolve();
+      `, async (err) => {
+        if (err) return reject(err);
+        try {
+          await migrateDB();
+          resolve();
+        } catch (mErr) {
+          reject(mErr);
+        }
       });
     });
   });

@@ -6,6 +6,13 @@ const WebSocket = require('ws');
 const { run, get, all, initDB } = require('./db');
 const { evaluateGuard } = require('./guard');
 const { seedDemoData } = require('./seed');
+const {
+  scheduleTimeout,
+  clearInstanceTimeout,
+  rebuildAllTimers,
+  getTimeoutInfoForInstance,
+  setBroadcast
+} = require('./timeout-manager');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,6 +32,30 @@ function broadcastToMachine(machineId, message) {
       ws.send(JSON.stringify(message));
     }
   }
+}
+
+setBroadcast(broadcastToMachine);
+
+function buildTimeoutInfo(instanceId, machineDefinition, currentStateId, enteredStateAt) {
+  const scheduled = getTimeoutInfoForInstance(instanceId);
+  if (scheduled) return scheduled;
+
+  if (!machineDefinition || !currentStateId) {
+    return { hasTimeout: false, remainingSeconds: null, timeoutEvent: null };
+  }
+  const currentState = machineDefinition.states.find(s => s.id === currentStateId);
+  if (!currentState || !currentState.timeout) {
+    return { hasTimeout: false, remainingSeconds: null, timeoutEvent: null };
+  }
+  const t = currentState.timeout;
+  const base = enteredStateAt ? new Date(enteredStateAt).getTime() : Date.now();
+  const elapsed = (Date.now() - base) / 1000;
+  const remaining = Math.max(0, t.duration - elapsed);
+  return {
+    hasTimeout: true,
+    remainingSeconds: Math.round(remaining * 10) / 10,
+    timeoutEvent: t.event
+  };
 }
 
 wss.on('connection', (ws) => {
@@ -150,7 +181,8 @@ app.get('/api/machines/:machineId/instances', async (req, res) => {
       currentStateId: row.current_state_id,
       context: JSON.parse(row.context_data),
       createdAt: row.created_at,
-      isFinal: !!row.is_final
+      isFinal: !!row.is_final,
+      timeoutInfo: buildTimeoutInfo(row.id, machine.definition, row.current_state_id, row.entered_state_at)
     }));
 
     res.json(instances);
@@ -172,9 +204,13 @@ app.post('/api/machines/:machineId/instances', async (req, res) => {
     const now = new Date().toISOString();
 
     await run(
-      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final) VALUES (?, ?, ?, ?, ?, ?)',
-      [id, machine.id, initialState.id, JSON.stringify(context), now, initialState.isFinal ? 1 : 0]
+      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final, entered_state_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, machine.id, initialState.id, JSON.stringify(context), now, initialState.isFinal ? 1 : 0, now]
     );
+
+    if (!initialState.isFinal && initialState.timeout) {
+      scheduleTimeout(id, initialState.timeout, now);
+    }
 
     res.json({
       id,
@@ -182,7 +218,8 @@ app.post('/api/machines/:machineId/instances', async (req, res) => {
       currentStateId: initialState.id,
       context,
       createdAt: now,
-      isFinal: !!initialState.isFinal
+      isFinal: !!initialState.isFinal,
+      timeoutInfo: buildTimeoutInfo(id, machine.definition, initialState.id, now)
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -193,6 +230,8 @@ app.get('/api/instances/:id', async (req, res) => {
   try {
     const row = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
     if (!row) return res.status(404).json({ error: 'Instance not found' });
+
+    const machine = await getMachineById(row.machine_id);
 
     const historyRows = await all(
       'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
@@ -205,7 +244,8 @@ app.get('/api/instances/:id', async (req, res) => {
       toStateId: h.to_state_id,
       event: h.event_name,
       payload: h.payload_snapshot ? JSON.parse(h.payload_snapshot) : null,
-      createdAt: h.created_at
+      createdAt: h.created_at,
+      triggeredBy: h.triggered_by || 'user'
     }));
 
     res.json({
@@ -215,6 +255,7 @@ app.get('/api/instances/:id', async (req, res) => {
       context: JSON.parse(row.context_data),
       createdAt: row.created_at,
       isFinal: !!row.is_final,
+      timeoutInfo: buildTimeoutInfo(row.id, machine ? machine.definition : null, row.current_state_id, row.entered_state_at),
       history
     });
   } catch (e) {
@@ -268,14 +309,19 @@ app.post('/api/instances/:id/send', async (req, res) => {
     const isFinal = targetState.isFinal ? 1 : 0;
 
     await run(
-      'UPDATE instances SET current_state_id = ?, is_final = ? WHERE id = ?',
-      [targetState.id, isFinal, row.id]
+      'UPDATE instances SET current_state_id = ?, is_final = ?, entered_state_at = ? WHERE id = ?',
+      [targetState.id, isFinal, now, row.id]
     );
 
     await run(
-      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [transitionId, row.id, currentStateId, targetState.id, event, JSON.stringify(payload || {}), now]
+      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [transitionId, row.id, currentStateId, targetState.id, event, JSON.stringify(payload || {}), now, 'user']
     );
+
+    clearInstanceTimeout(row.id);
+    if (!targetState.isFinal && targetState.timeout) {
+      scheduleTimeout(row.id, targetState.timeout, now);
+    }
 
     const wsMessage = {
       type: 'transition',
@@ -284,6 +330,7 @@ app.post('/api/instances/:id/send', async (req, res) => {
       fromStateId: currentStateId,
       toStateId: targetState.id,
       event,
+      triggeredBy: 'user',
       timestamp: now,
       isFinal: !!isFinal
     };
@@ -295,7 +342,8 @@ app.post('/api/instances/:id/send', async (req, res) => {
       toStateId: targetState.id,
       event,
       timestamp: now,
-      isFinal: !!isFinal
+      isFinal: !!isFinal,
+      triggeredBy: 'user'
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -474,6 +522,7 @@ async function start() {
   try {
     await initDB();
     await seedDemoData();
+    await rebuildAllTimers();
     server.listen(PORT, () => {
       console.log(`Workflow server running on port ${PORT}`);
     });
