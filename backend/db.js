@@ -118,12 +118,46 @@ function initDB() {
           FOREIGN KEY (machine_id) REFERENCES machines(id)
         );
 
+        CREATE TABLE IF NOT EXISTS compliance_policies (
+          id TEXT PRIMARY KEY,
+          machine_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT,
+          type TEXT NOT NULL,
+          config_json TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (machine_id) REFERENCES machines(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS compliance_violations (
+          id TEXT PRIMARY KEY,
+          policy_id TEXT,
+          machine_id TEXT NOT NULL,
+          instance_id TEXT,
+          event_name TEXT,
+          from_state_id TEXT,
+          to_state_id TEXT,
+          reason TEXT NOT NULL,
+          payload_snapshot TEXT,
+          attempted_at TEXT NOT NULL,
+          detected_during TEXT NOT NULL DEFAULT 'runtime',
+          FOREIGN KEY (policy_id) REFERENCES compliance_policies(id),
+          FOREIGN KEY (machine_id) REFERENCES machines(id),
+          FOREIGN KEY (instance_id) REFERENCES instances(id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_instances_machine ON instances(machine_id);
         CREATE INDEX IF NOT EXISTS idx_transitions_instance ON transitions(instance_id);
         CREATE INDEX IF NOT EXISTS idx_templates_machine ON templates(machine_id);
         CREATE INDEX IF NOT EXISTS idx_state_durations_machine ON state_durations(machine_id);
         CREATE INDEX IF NOT EXISTS idx_state_durations_instance ON state_durations(instance_id);
         CREATE INDEX IF NOT EXISTS idx_state_durations_entered ON state_durations(entered_at);
+        CREATE INDEX IF NOT EXISTS idx_compliance_policies_machine ON compliance_policies(machine_id);
+        CREATE INDEX IF NOT EXISTS idx_compliance_violations_machine ON compliance_violations(machine_id);
+        CREATE INDEX IF NOT EXISTS idx_compliance_violations_instance ON compliance_violations(instance_id);
+        CREATE INDEX IF NOT EXISTS idx_compliance_violations_policy ON compliance_violations(policy_id);
+        CREATE INDEX IF NOT EXISTS idx_compliance_violations_attempted ON compliance_violations(attempted_at);
       `, async (err) => {
         if (err) return reject(err);
         try {

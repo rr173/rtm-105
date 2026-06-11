@@ -1,6 +1,7 @@
 const { run, get, all } = require('./db');
 const { v4: uuidv4 } = require('uuid');
 const { recordStateDuration } = require('./metrics');
+const { addPolicy, getPoliciesByMachineId } = require('./compliance-engine');
 
 async function createInstanceWithHistory(machineId, states, path, baseTime) {
   const sMap = new Map();
@@ -278,6 +279,40 @@ async function seedDemoData() {
     );
 
     console.log('Demo templates seeded: 订单审批 and 请假审批 templates created.');
+  }
+
+  if (orderMachineId) {
+    const existingPolicies = await getPoliciesByMachineId(orderMachineId, { includeDisabled: true });
+    if (existingPolicies.length === 0) {
+      try {
+        await addPolicy({
+          machineId: orderMachineId,
+          name: '待审批最短停留5秒',
+          description: '防止审批过快,要求在待审批状态至少停留5秒',
+          type: 'mandatory_dwell',
+          config: {
+            stateName: '待审批',
+            minSeconds: 5
+          },
+          enabled: true
+        });
+        await addPolicy({
+          machineId: orderMachineId,
+          name: 'approve事件10秒内最多2次',
+          description: '限制approve事件频率,防止批量误操作',
+          type: 'event_rate_limit',
+          config: {
+            eventName: 'approve',
+            windowSeconds: 10,
+            maxCount: 2
+          },
+          enabled: true
+        });
+        console.log('Demo compliance policies seeded: 2 policies added for 订单审批 state machine.');
+      } catch (e) {
+        console.error('Failed to seed demo compliance policies:', e);
+      }
+    }
   }
 }
 

@@ -2,6 +2,7 @@ const { all, get, run } = require('./db');
 const { v4: uuidv4 } = require('uuid');
 const { evaluateGuard } = require('./guard');
 const { recordStateDuration } = require('./metrics');
+const { checkTransitionCompliance } = require('./compliance-engine');
 
 const activeTimers = new Map();
 
@@ -87,6 +88,37 @@ async function sendTimeoutEvent(instanceId, timeoutConfig) {
   const targetState = definition.states.find(s => s.id === matchedTransition.targetStateId);
   if (!targetState) {
     console.error(`[Timeout] Target state ${matchedTransition.targetStateId} not found`);
+    return;
+  }
+
+  const histRows = await all(
+    'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
+    [instanceId]
+  );
+  const history = histRows.map(h => ({
+    id: h.id,
+    event: h.event_name,
+    fromStateId: h.from_state_id,
+    toStateId: h.to_state_id,
+    payload: h.payload_snapshot ? JSON.parse(h.payload_snapshot) : null,
+    createdAt: h.created_at
+  }));
+
+  const complianceCheck = await checkTransitionCompliance({
+    machineId: row.machine_id,
+    machineDefinition: definition,
+    instanceId,
+    currentStateId,
+    targetStateId: targetState.id,
+    event,
+    payload: payload || {},
+    history,
+    enteredStateAt: row.entered_state_at || row.created_at
+  });
+
+  if (!complianceCheck.allowed) {
+    console.log(`[Timeout] Compliance check blocked transition for instance ${instanceId} via event ${event}: ${JSON.stringify(complianceCheck.violations)}`);
+    clearInstanceTimeout(instanceId);
     return;
   }
 

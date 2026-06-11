@@ -20,6 +20,17 @@ const {
   getTimeoutInfoForInstance,
   setBroadcast
 } = require('./timeout-manager');
+const {
+  addPolicy,
+  updatePolicy,
+  deletePolicy,
+  getPolicyById,
+  getPoliciesByMachineId,
+  getViolations,
+  checkTransitionCompliance,
+  auditInstanceHistory,
+  auditCompletedInstances
+} = require('./compliance-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -315,6 +326,38 @@ app.post('/api/instances/:id/send', async (req, res) => {
     const targetState = machine.definition.states.find(s => s.id === matchedTransition.targetStateId);
     if (!targetState) return res.status(500).json({ error: 'Target state not found' });
 
+    const historyRows = await all(
+      'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
+      [req.params.id]
+    );
+    const history = historyRows.map(h => ({
+      id: h.id,
+      event: h.event_name,
+      fromStateId: h.from_state_id,
+      toStateId: h.to_state_id,
+      payload: h.payload_snapshot ? JSON.parse(h.payload_snapshot) : null,
+      createdAt: h.created_at
+    }));
+
+    const complianceCheck = await checkTransitionCompliance({
+      machineId: machine.id,
+      machineDefinition: machine.definition,
+      instanceId: row.id,
+      currentStateId,
+      targetStateId: targetState.id,
+      event,
+      payload: payload || {},
+      history,
+      enteredStateAt: row.entered_state_at || row.created_at
+    });
+
+    if (!complianceCheck.allowed) {
+      return res.status(403).json({
+        error: 'Compliance check failed, transition blocked',
+        complianceViolations: complianceCheck.violations
+      });
+    }
+
     const transitionId = uuidv4();
     const now = new Date().toISOString();
     const isFinal = targetState.isFinal ? 1 : 0;
@@ -580,6 +623,131 @@ app.get('/api/machines/:machineId/metrics/lifecycle', async (req, res) => {
       timeFilter,
       ...data
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/compliance/policies', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const includeDisabled = req.query.includeDisabled === 'true' || req.query.includeDisabled === '1';
+    const policies = await getPoliciesByMachineId(req.params.machineId, { includeDisabled });
+    res.json(policies);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/machines/:machineId/compliance/policies', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const policy = await addPolicy({
+      ...req.body,
+      machineId: req.params.machineId
+    });
+    res.status(201).json(policy);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/compliance/policies/:id', async (req, res) => {
+  try {
+    const policy = await getPolicyById(req.params.id);
+    if (!policy) return res.status(404).json({ error: 'Policy not found' });
+    res.json(policy);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/compliance/policies/:id', async (req, res) => {
+  try {
+    const policy = await updatePolicy(req.params.id, req.body);
+    res.json(policy);
+  } catch (e) {
+    if (e.message === 'Policy not found') {
+      return res.status(404).json({ error: e.message });
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/compliance/policies/:id', async (req, res) => {
+  try {
+    const deleted = await deletePolicy(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Policy not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/compliance/violations', async (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.machineId) filters.machineId = req.query.machineId;
+    if (req.query.instanceId) filters.instanceId = req.query.instanceId;
+    if (req.query.policyId) filters.policyId = req.query.policyId;
+    if (req.query.detectedDuring) filters.detectedDuring = req.query.detectedDuring;
+    if (req.query.limit) {
+      const n = parseInt(req.query.limit, 10);
+      if (!isNaN(n) && n > 0) filters.limit = n;
+    }
+    const violations = await getViolations(filters);
+    res.json(violations);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/machines/:machineId/compliance/audit', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const result = await auditCompletedInstances(req.params.machineId, {
+      machineDefinition: machine.definition
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/instances/:id/compliance/audit', async (req, res) => {
+  try {
+    const row = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Instance not found' });
+    const machine = await getMachineById(row.machine_id);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    const initialState = machine.definition.states.find(s => s.isInitial);
+    const histRows = await all(
+      'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
+      [req.params.id]
+    );
+    const history = histRows.map(h => ({
+      id: h.id,
+      event: h.event_name,
+      fromStateId: h.from_state_id,
+      toStateId: h.to_state_id,
+      payload: h.payload_snapshot ? JSON.parse(h.payload_snapshot) : null,
+      createdAt: h.created_at
+    }));
+
+    const result = await auditInstanceHistory({
+      instanceId: row.id,
+      machineId: row.machine_id,
+      machineDefinition: machine.definition,
+      fullHistory: history,
+      initialStateId: initialState ? initialState.id : null,
+      initialEnteredAt: row.created_at,
+      instanceCreatedAt: row.created_at
+    });
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
