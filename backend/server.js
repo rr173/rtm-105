@@ -352,6 +352,25 @@ app.post('/api/instances/:id/send', async (req, res) => {
     });
 
     if (!complianceCheck.allowed) {
+      const now = new Date().toISOString();
+      for (const v of complianceCheck.violations) {
+        const alertMsg = {
+          type: 'compliance_alert',
+          machineId: machine.id,
+          instanceId: row.id,
+          policyId: v.policyId,
+          policyName: v.policyName,
+          policyType: v.policyType,
+          eventName: event,
+          fromStateId: currentStateId,
+          toStateId: targetState.id,
+          reason: v.reason,
+          attemptedAt: now,
+          currentStateId: currentStateId
+        };
+        broadcastToMachine(machine.id, alertMsg);
+      }
+
       return res.status(403).json({
         error: 'Compliance check failed, transition blocked',
         complianceViolations: complianceCheck.violations
@@ -748,6 +767,51 @@ app.post('/api/instances/:id/compliance/audit', async (req, res) => {
       instanceCreatedAt: row.created_at
     });
     res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/compliance/violations/stats', async (req, res) => {
+  try {
+    const machineId = req.params.machineId;
+    const machine = await getMachineById(machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    const oneMinuteAgo = new Date(Date.now() - 60 * 1000).toISOString();
+
+    const totalResult = await get(
+      'SELECT COUNT(*) as cnt FROM compliance_violations WHERE machine_id = ? AND detected_during = ?',
+      [machineId, 'runtime']
+    );
+
+    const recentResult = await get(
+      'SELECT COUNT(*) as cnt FROM compliance_violations WHERE machine_id = ? AND detected_during = ? AND attempted_at >= ?',
+      [machineId, 'runtime', oneMinuteAgo]
+    );
+
+    const topPolicyResult = await get(
+      `SELECT cv.policy_id, cp.name as policy_name, COUNT(*) as cnt 
+       FROM compliance_violations cv 
+       LEFT JOIN compliance_policies cp ON cv.policy_id = cp.id 
+       WHERE cv.machine_id = ? AND cv.detected_during = ? 
+       GROUP BY cv.policy_id, cp.name 
+       ORDER BY cnt DESC 
+       LIMIT 1`,
+      [machineId, 'runtime']
+    );
+
+    res.json({
+      machineId,
+      totalViolations: totalResult ? totalResult.cnt : 0,
+      lastMinuteViolations: recentResult ? recentResult.cnt : 0,
+      lastMinuteFrequency: recentResult ? recentResult.cnt : 0,
+      topPolicy: topPolicyResult ? {
+        policyId: topPolicyResult.policy_id,
+        policyName: topPolicyResult.policy_name || '未知策略',
+        count: topPolicyResult.cnt
+      } : null
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

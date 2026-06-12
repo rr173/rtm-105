@@ -61,6 +61,12 @@ class WorkflowApp {
     this.selectedTemplate = null;
     this.previewCtx = null;
     
+    this.violations = [];
+    this.selectedViolationId = null;
+    this.highlightedStateId = null;
+    this.violationStatsTimer = null;
+    this.flashBadgeTimer = null;
+    
     this.init();
   }
   
@@ -116,6 +122,7 @@ class WorkflowApp {
     document.getElementById('btn-publish').addEventListener('click', () => this.publishMachine());
     document.getElementById('btn-create-instance').addEventListener('click', () => this.createInstance());
     document.getElementById('btn-send-event').addEventListener('click', () => this.sendEvent());
+    document.getElementById('btn-clear-violations').addEventListener('click', () => this.clearViolations());
     this.bindTemplateMarketEvents();
   }
 
@@ -778,9 +785,14 @@ class WorkflowApp {
     this.instances = [];
     this.selectedInstance = null;
     this.instanceStates = new Map();
+    this.violations = [];
+    this.selectedViolationId = null;
+    this.highlightedStateId = null;
+    this.stopViolationStatsTimer();
     this.clearSelection();
     this.updateCurrentName();
     this.updateInstancePanel();
+    this.updateViolationPanel();
     this.disconnectWS();
     toast('已创建新状态机', 'info');
   }
@@ -972,7 +984,13 @@ class WorkflowApp {
 
       await this.loadInstances();
       this.updateInstancePanel();
+      this.violations = [];
+      this.selectedViolationId = null;
+      this.highlightedStateId = null;
+      this.updateViolationPanel();
       this.connectWS(id);
+      this.startViolationStatsTimer();
+      this.fetchViolationStats();
     } catch (e) {
       toast('加载状态机失败', 'error');
     }
@@ -1071,6 +1089,7 @@ class WorkflowApp {
   }
   
   disconnectWS() {
+    this.stopViolationStatsTimer();
     if (this.ws) {
       try { this.ws.close(); } catch (e) {}
       this.ws = null;
@@ -1078,30 +1097,183 @@ class WorkflowApp {
   }
   
   handleWSMessage(msg) {
-    if (msg.type !== 'transition') return;
-    
-    const transition = this.transitions.find(
-      t => t.sourceStateId === msg.fromStateId && t.targetStateId === msg.toStateId && t.event === msg.event
-    );
-    if (transition) {
-      this.flashingArrows.set(transition.id, Date.now());
-    }
-    
-    const idx = this.instances.findIndex(i => i.id === msg.instanceId);
-    if (idx >= 0) {
-      this.instances[idx].currentStateId = msg.toStateId;
-      if (msg.isFinal !== undefined) {
-        this.instances[idx].isFinal = msg.isFinal;
+    if (msg.type === 'transition') {
+      const transition = this.transitions.find(
+        t => t.sourceStateId === msg.fromStateId && t.targetStateId === msg.toStateId && t.event === msg.event
+      );
+      if (transition) {
+        this.flashingArrows.set(transition.id, Date.now());
       }
+      
+      const idx = this.instances.findIndex(i => i.id === msg.instanceId);
+      if (idx >= 0) {
+        this.instances[idx].currentStateId = msg.toStateId;
+        if (msg.isFinal !== undefined) {
+          this.instances[idx].isFinal = msg.isFinal;
+        }
+      }
+      this.countInstanceState();
+      this.renderInstanceList();
+      
+      if (this.selectedInstance === msg.instanceId) {
+        this.selectInstance(msg.instanceId);
+      }
+      
+      this.loadMachines();
+    } else if (msg.type === 'compliance_alert') {
+      this.addViolation(msg);
     }
-    this.countInstanceState();
-    this.renderInstanceList();
+  }
+  
+  updateViolationPanel() {
+    const section = document.getElementById('violation-section');
+    if (this.selectedMachine && !this.isDesignMode) {
+      section.style.display = 'block';
+    } else {
+      section.style.display = 'none';
+    }
+    this.renderViolationList();
+  }
+  
+  addViolation(violation) {
+    const violationWithId = {
+      ...violation,
+      id: 'v_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+      isNew: true
+    };
     
-    if (this.selectedInstance === msg.instanceId) {
-      this.selectInstance(msg.instanceId);
+    this.violations.unshift(violationWithId);
+    
+    if (this.violations.length > 100) {
+      this.violations = this.violations.slice(0, 100);
     }
     
-    this.loadMachines();
+    this.renderViolationList();
+    this.showFlashBadge();
+    this.fetchViolationStats();
+    
+    setTimeout(() => {
+      const v = this.violations.find(v => v.id === violationWithId.id);
+      if (v) v.isNew = false;
+      this.renderViolationList();
+    }, 1000);
+    
+    toast(`🚨 合规违规: ${violation.policyName}`, 'error');
+  }
+  
+  renderViolationList() {
+    const container = document.getElementById('violation-list');
+    
+    if (this.violations.length === 0) {
+      container.innerHTML = '<div class="violation-empty">暂无实时违规记录</div>';
+      return;
+    }
+    
+    container.innerHTML = this.violations.map(v => {
+      const state = this.states.find(s => s.id === v.currentStateId);
+      const stateName = state ? state.name : (v.currentStateId || '未知');
+      const timeStr = new Date(v.attemptedAt).toLocaleString();
+      const newClass = v.isNew ? ' new-violation' : '';
+      const activeClass = this.selectedViolationId === v.id ? ' active' : '';
+      
+      return `
+        <div class="violation-item${newClass}${activeClass}" data-id="${escapeHtml(v.id)}">
+          <div class="violation-header">
+            <span class="violation-instance">${escapeHtml(v.instanceId.slice(0, 10))}…</span>
+            <span class="violation-time">${escapeHtml(timeStr)}</span>
+          </div>
+          <span class="violation-policy">${escapeHtml(v.policyName)}</span>
+          <div class="violation-event">
+            拦截事件: <strong>${escapeHtml(v.eventName || '未知')}</strong>
+          </div>
+          <div class="violation-event">
+            当前状态: <strong>${escapeHtml(stateName)}</strong>
+          </div>
+          <div class="violation-reason">${escapeHtml(v.reason)}</div>
+        </div>
+      `;
+    }).join('');
+    
+    container.querySelectorAll('.violation-item').forEach(el => {
+      el.onclick = () => this.selectViolation(el.dataset.id);
+    });
+    
+    if (this.violations.length > 0 && this.violations[0].isNew) {
+      container.scrollTop = 0;
+    }
+  }
+  
+  showFlashBadge() {
+    const badge = document.getElementById('violation-flash-badge');
+    badge.style.display = 'inline-block';
+    
+    if (this.flashBadgeTimer) {
+      clearTimeout(this.flashBadgeTimer);
+    }
+    
+    this.flashBadgeTimer = setTimeout(() => {
+      badge.style.display = 'none';
+    }, 3000);
+  }
+  
+  clearViolations() {
+    this.violations = [];
+    this.selectedViolationId = null;
+    this.highlightedStateId = null;
+    this.renderViolationList();
+    toast('违规记录已清空', 'info');
+  }
+  
+  selectViolation(violationId) {
+    this.selectedViolationId = violationId;
+    const violation = this.violations.find(v => v.id === violationId);
+    
+    if (violation) {
+      this.highlightedStateId = violation.currentStateId;
+      this.renderViolationList();
+      
+      setTimeout(() => {
+        this.highlightedStateId = null;
+      }, 3000);
+    }
+  }
+  
+  async fetchViolationStats() {
+    if (!this.selectedMachine || this.isDesignMode) return;
+    
+    try {
+      const res = await fetch(API_BASE + '/api/machines/' + this.selectedMachine + '/compliance/violations/stats');
+      const stats = await res.json();
+      this.updateStatsDisplay(stats);
+    } catch (e) {
+      console.error('Failed to fetch violation stats:', e);
+    }
+  }
+  
+  updateStatsDisplay(stats) {
+    document.getElementById('stat-total').textContent = stats.totalViolations;
+    document.getElementById('stat-frequency').textContent = stats.lastMinuteFrequency + '/分钟';
+    document.getElementById('stat-top-policy').textContent = stats.topPolicy 
+      ? `${stats.topPolicy.policyName} (${stats.topPolicy.count}次)` 
+      : '-';
+  }
+  
+  startViolationStatsTimer() {
+    this.stopViolationStatsTimer();
+    this.violationStatsTimer = setInterval(() => {
+      this.fetchViolationStats();
+    }, 5000);
+  }
+  
+  stopViolationStatsTimer() {
+    if (this.violationStatsTimer) {
+      clearInterval(this.violationStatsTimer);
+      this.violationStatsTimer = null;
+    }
+    if (this.flashBadgeTimer) {
+      clearTimeout(this.flashBadgeTimer);
+      this.flashBadgeTimer = null;
+    }
   }
   
   render() {
@@ -1135,6 +1307,7 @@ class WorkflowApp {
     const x = s.x, y = s.y, w = STATE_WIDTH, h = STATE_HEIGHT;
     
     const isSelected = this.selectedNode === s.id;
+    const isHighlighted = this.highlightedStateId === s.id;
     const instCount = this.instanceStates.get(s.id) || 0;
     
     let fillColor = '#ffffff';
@@ -1143,7 +1316,12 @@ class WorkflowApp {
     
     if (s.isFinal) fillColor = '#f6ffed';
     if (isSelected) { strokeColor = '#1890ff'; lineWidth = 3; }
-    if (instCount > 0) fillColor = this.isDesignMode ? fillColor : '#e6f7ff';
+    if (isHighlighted) { 
+      strokeColor = '#ff4d4f'; 
+      lineWidth = 4;
+      fillColor = '#fff1f0';
+    }
+    if (instCount > 0) fillColor = this.isDesignMode ? fillColor : (isHighlighted ? '#fff1f0' : '#e6f7ff');
     
     ctx.fillStyle = fillColor;
     ctx.strokeStyle = strokeColor;

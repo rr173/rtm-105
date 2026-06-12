@@ -50,6 +50,28 @@
         <h3>编辑选中项</h3>
         <div id="edit-panel"></div>
       </div>
+      <div class="sidebar-section" id="violation-section" style="display:none;">
+        <h3>🚨 违规告警 <span id="violation-flash-badge" class="violation-flash-badge" style="display:none;">新</span></h3>
+        <div id="violation-stats" class="violation-stats">
+          <div class="stat-item">
+            <span class="stat-label">累计违规</span>
+            <span class="stat-value" id="stat-total">0</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">近1分钟</span>
+            <span class="stat-value" id="stat-frequency">0</span>
+          </div>
+          <div class="stat-item stat-full">
+            <span class="stat-label">高频策略</span>
+            <span class="stat-value" id="stat-top-policy">-</span>
+          </div>
+        </div>
+        <div class="violation-list-header">
+          <span>违规事件流</span>
+          <button id="btn-clear-violations" class="btn btn-sm btn-danger" style="padding:2px 8px;font-size:11px;">清空</button>
+        </div>
+        <div id="violation-list" class="violation-list"></div>
+      </div>
     </aside>
   </main>
 
