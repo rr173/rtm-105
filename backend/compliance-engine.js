@@ -222,13 +222,15 @@ function checkForbiddenSequence(policy, context) {
   const currentName = currentStateId ? stateNameMap.get(currentStateId) : null;
   const targetName = targetStateId ? stateNameMap.get(targetStateId) : null;
   const historyNames = [];
-  if (history) {
+  if (history && history.length > 0) {
+    const firstFromName = history[0].fromStateId ? stateNameMap.get(history[0].fromStateId) : null;
+    if (firstFromName) historyNames.push(firstFromName);
     for (const h of history) {
       const name = h.toStateId ? stateNameMap.get(h.toStateId) : null;
       if (name) historyNames.push(name);
     }
   }
-  if (currentName && !historyNames.includes(currentName)) {
+  if (currentName && historyNames[historyNames.length - 1] !== currentName) {
     historyNames.push(currentName);
   }
   if (!targetName) return null;
