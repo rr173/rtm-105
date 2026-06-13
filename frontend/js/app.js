@@ -1229,7 +1229,12 @@ class WorkflowApp {
     const violation = this.violations.find(v => v.id === violationId);
     
     if (violation) {
-      this.highlightedStateId = violation.currentStateId;
+      const instance = this.instances.find(inst => inst.id === violation.instanceId);
+      if (instance) {
+        this.highlightedStateId = instance.currentStateId;
+      } else {
+        this.highlightedStateId = violation.currentStateId;
+      }
       this.renderViolationList();
       
       setTimeout(() => {
