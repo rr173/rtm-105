@@ -67,6 +67,14 @@ class WorkflowApp {
     this.violationStatsTimer = null;
     this.flashBadgeTimer = null;
     
+    this.machineGroups = [];
+    this.expandedGroups = new Set();
+    this.migrationSourceMachine = null;
+    this.migrationTargetMachineId = null;
+    this.migrationSelectedInstances = new Set();
+    this.migrationCheckResult = null;
+    this.latestVersions = new Map();
+    
     this.init();
   }
   
@@ -124,6 +132,19 @@ class WorkflowApp {
     document.getElementById('btn-send-event').addEventListener('click', () => this.sendEvent());
     document.getElementById('btn-clear-violations').addEventListener('click', () => this.clearViolations());
     this.bindTemplateMarketEvents();
+    this.bindMigrationEvents();
+  }
+
+  bindMigrationEvents() {
+    document.getElementById('btn-close-migration').addEventListener('click', () => this.closeMigrationModal());
+    document.getElementById('migration-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'migration-modal') this.closeMigrationModal();
+    });
+    document.getElementById('migration-target-select').addEventListener('change', (e) => this.onTargetVersionChange(e.target.value));
+    document.getElementById('btn-check-migration').addEventListener('click', () => this.checkMigration());
+    document.getElementById('btn-back-to-select').addEventListener('click', () => this.showMigrationStep('select'));
+    document.getElementById('btn-execute-migration').addEventListener('click', () => this.executeMigration());
+    document.getElementById('btn-close-migration-result').addEventListener('click', () => this.closeMigrationModal());
   }
 
   bindTemplateMarketEvents() {
@@ -822,14 +843,28 @@ class WorkflowApp {
       container.innerHTML = '<span style="color:#8c8c8c;font-size:12px;">暂无实例</span>';
       return;
     }
+    
+    const currentMachine = this.machines.find(m => m.id === this.selectedMachine);
+    const latestVersion = currentMachine ? this.latestVersions.get(currentMachine.name) : null;
+    
     container.innerHTML = this.instances.map(inst => {
       const state = this.states.find(s => s.id === inst.currentStateId);
       const stateName = state ? state.name : inst.currentStateId;
       const cls = 'instance-chip' + 
         (inst.id === this.selectedInstance ? ' active' : '') +
         (inst.isFinal ? ' final' : '');
+      
+      let versionBadge = '';
+      if (inst.machineVersion !== undefined && latestVersion !== null) {
+        if (inst.machineVersion < latestVersion) {
+          versionBadge = `<span class="instance-version-badge outdated">v${inst.machineVersion}</span>`;
+        } else {
+          versionBadge = `<span class="instance-version-badge latest">v${inst.machineVersion}</span>`;
+        }
+      }
+      
       return `<div class="${cls}" data-id="${inst.id}">
-        ${inst.id.slice(0, 8)}… [${stateName}]
+        ${inst.id.slice(0, 8)}… [${stateName}]${versionBadge}
       </div>`;
     }).join('');
     container.querySelectorAll('.instance-chip').forEach(el => {
@@ -854,6 +889,41 @@ class WorkflowApp {
     const currentState = this.states.find(s => s.id === inst.currentStateId);
     const stateName = currentState ? currentState.name : inst.currentStateId;
     
+    let versionInfo = '';
+    if (inst.machineVersion !== undefined && inst.machineName) {
+      const latestVersion = this.latestVersions.get(inst.machineName);
+      const isLatest = latestVersion && inst.machineVersion >= latestVersion;
+      versionInfo = `
+        <div>
+          <strong>版本:</strong> 
+          <span class="instance-version-badge ${isLatest ? 'latest' : 'outdated'}">v${inst.machineVersion}</span>
+          ${!isLatest ? `<span style="color:#fa8c16;font-size:11px;margin-left:6px;">⚠️ 不是最新版本 (最新: v${latestVersion})</span>` : ''}
+        </div>
+      `;
+    }
+    
+    let migrationHistoryHtml = '';
+    if (inst.migrationHistory && inst.migrationHistory.length > 0) {
+      migrationHistoryHtml = '<div style="margin-top:10px;"><strong>版本迁移历史:</strong><div>';
+      for (const m of inst.migrationHistory) {
+        const statusBadge = m.status === 'completed' 
+          ? '<span class="result-status status-success" style="font-size:10px;">成功</span>'
+          : '<span class="result-status status-failed" style="font-size:10px;">失败</span>';
+        migrationHistoryHtml += `<div class="migration-history-item">
+          <div class="migration-history-title">
+            v${m.sourceVersion} → v${m.targetVersion} ${statusBadge}
+          </div>
+          <div class="migration-history-detail">
+            操作人: ${escapeHtml(m.operator)}<br>
+            时间: ${new Date(m.createdAt).toLocaleString()}
+            ${m.errorMessage ? `<br><span style="color:#ff4d4f;">失败原因: ${escapeHtml(m.errorMessage)}</span>` : ''}
+            ${m.warnings && m.warnings.length > 0 ? `<br><span style="color:#d48806;">警告: ${m.warnings.map(w => escapeHtml(w)).join('; ')}</span>` : ''}
+          </div>
+        </div>`;
+      }
+      migrationHistoryHtml += '</div></div>';
+    }
+    
     let historyHtml = '';
     if (inst.history && inst.history.length > 0) {
       historyHtml = '<div style="margin-top:10px;"><strong>流转历史:</strong><div>';
@@ -862,13 +932,25 @@ class WorkflowApp {
         const toS = this.states.find(s => s.id === h.toStateId);
         const fromName = fromS ? fromS.name : h.fromStateId;
         const toName = toS ? toS.name : h.toStateId;
-        historyHtml += `<div class="history-item">
-          <span style="color:#8c8c8c;">${new Date(h.createdAt).toLocaleString()}</span><br>
-          <span style="color:#1890ff;">${fromName}</span> → 
-          <strong>[${h.event}]</strong> → 
-          <span style="color:#52c41a;">${toName}</span>
-          ${h.payload ? `<div style="color:#8c8c8c;">payload: ${JSON.stringify(h.payload)}</div>` : ''}
-        </div>`;
+        
+        if (h.event === '__version_migration__') {
+          const payload = h.payload || {};
+          historyHtml += `<div class="history-item" style="background:#f0f5ff;border-left:3px solid #1890ff;">
+            <span style="color:#8c8c8c;">${new Date(h.createdAt).toLocaleString()}</span><br>
+            <span style="color:#1890ff;font-weight:600;">🔄 版本迁移</span>: v${payload.fromVersion} → v${payload.toVersion}
+            <span style="color:#8c8c8c;font-size:11px;">(${h.triggeredBy})</span>
+            ${payload.warnings && payload.warnings.length > 0 ? `<div style="color:#d48806;">警告: ${payload.warnings.map(w => escapeHtml(w)).join('; ')}</div>` : ''}
+          </div>`;
+        } else {
+          historyHtml += `<div class="history-item">
+            <span style="color:#8c8c8c;">${new Date(h.createdAt).toLocaleString()}</span><br>
+            <span style="color:#1890ff;">${fromName}</span> → 
+            <strong>[${escapeHtml(h.event)}]</strong> → 
+            <span style="color:#52c41a;">${toName}</span>
+            <span style="color:#8c8c8c;font-size:11px;">(${escapeHtml(h.triggeredBy || 'user')})</span>
+            ${h.payload ? `<div style="color:#8c8c8c;">payload: ${JSON.stringify(h.payload)}</div>` : ''}
+          </div>`;
+        }
       }
       historyHtml += '</div></div>';
     }
@@ -876,8 +958,10 @@ class WorkflowApp {
     detail.innerHTML = `
       <div><strong>实例ID:</strong> ${inst.id}</div>
       <div><strong>当前状态:</strong> <span style="color:#1890ff;font-weight:600;">${stateName}</span>${inst.isFinal ? ' <span class="badge badge-active">终态</span>' : ''}</div>
+      ${versionInfo}
       <div><strong>创建时间:</strong> ${new Date(inst.createdAt).toLocaleString()}</div>
       <div><strong>上下文:</strong> <code style="background:#f5f5f5;padding:2px 6px;border-radius:3px;">${JSON.stringify(inst.context)}</code></div>
+      ${migrationHistoryHtml}
       ${historyHtml}
     `;
   }
@@ -928,8 +1012,18 @@ class WorkflowApp {
   
   async loadMachines() {
     try {
-      const res = await fetch(API_BASE + '/api/machines');
-      this.machines = await res.json();
+      const [resFlat, resGrouped] = await Promise.all([
+        fetch(API_BASE + '/api/machines'),
+        fetch(API_BASE + '/api/machines/grouped')
+      ]);
+      this.machines = await resFlat.json();
+      this.machineGroups = await resGrouped.json();
+      
+      this.latestVersions.clear();
+      for (const group of this.machineGroups) {
+        this.latestVersions.set(group.name, group.latestVersion);
+      }
+      
       this.renderMachineList();
     } catch (e) {
       console.error(e);
@@ -938,21 +1032,75 @@ class WorkflowApp {
   
   renderMachineList() {
     const list = document.getElementById('machine-list');
-    if (this.machines.length === 0) {
+    if (this.machineGroups.length === 0) {
       list.innerHTML = '<div style="color:#8c8c8c;font-size:12px;">暂无已发布状态机</div>';
       return;
     }
-    list.innerHTML = this.machines.map(m => `
-      <div class="machine-card ${this.selectedMachine === m.id ? 'active' : ''}" data-id="${escapeHtml(m.id)}">
-        <div class="machine-name">${escapeHtml(m.name)}</div>
-        <div class="machine-meta">
-          <span>v${m.version}</span>
-          <span class="badge badge-active">${m.activeInstances} 实例</span>
+    
+    list.innerHTML = this.machineGroups.map(group => {
+      const isExpanded = this.expandedGroups.has(group.name);
+      return `
+        <div class="machine-group">
+          <div class="machine-group-header" data-group="${escapeHtml(group.name)}">
+            <div class="machine-group-title">${escapeHtml(group.name)}</div>
+            <div class="machine-group-meta">
+              <span class="machine-group-badge badge-version">v${group.latestVersion}</span>
+              <span class="machine-group-badge badge-latest">最新</span>
+              <span class="machine-group-badge" style="background:#1890ff;color:white;">${group.totalActiveInstances} 运行中</span>
+            </div>
+          </div>
+          <div class="machine-group-content ${isExpanded ? 'expanded' : ''}" data-content="${escapeHtml(group.name)}">
+            ${group.machines.map(m => {
+              const isLatest = m.version === group.latestVersion;
+              const hasActiveInstances = m.activeInstances > 0 && !isLatest;
+              return `
+                <div class="machine-version-item ${this.selectedMachine === m.id ? 'active' : ''} ${!isLatest ? 'outdated' : ''}" data-id="${escapeHtml(m.id)}">
+                  <div class="version-info">
+                    <div class="version-name">
+                      v${m.version}
+                      ${isLatest ? '<span class="instance-version-badge latest">最新</span>' : ''}
+                      ${hasActiveInstances ? '<span class="instance-version-badge outdated">有旧版本实例</span>' : ''}
+                    </div>
+                    <div class="version-meta">
+                      ${new Date(m.createdAt).toLocaleString()} · ${m.activeInstances} 运行中
+                    </div>
+                  </div>
+                  <div class="version-actions">
+                    ${hasActiveInstances ? `<button class="btn-migrate" data-migrate="${escapeHtml(m.id)}" data-name="${escapeHtml(group.name)}">迁移实例</button>` : ''}
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
         </div>
-      </div>
-    `).join('');
-    list.querySelectorAll('.machine-card').forEach(el => {
-      el.onclick = () => this.loadMachine(el.dataset.id);
+      `;
+    }).join('');
+    
+    list.querySelectorAll('.machine-group-header').forEach(el => {
+      el.onclick = (e) => {
+        e.stopPropagation();
+        const groupName = el.dataset.group;
+        if (this.expandedGroups.has(groupName)) {
+          this.expandedGroups.delete(groupName);
+        } else {
+          this.expandedGroups.add(groupName);
+        }
+        this.renderMachineList();
+      };
+    });
+    
+    list.querySelectorAll('.machine-version-item').forEach(el => {
+      el.onclick = (e) => {
+        if (e.target.closest('.btn-migrate')) return;
+        this.loadMachine(el.dataset.id);
+      };
+    });
+    
+    list.querySelectorAll('.btn-migrate').forEach(el => {
+      el.onclick = (e) => {
+        e.stopPropagation();
+        this.openMigrationModal(el.dataset.migrate, el.dataset.name);
+      };
     });
   }
   
@@ -1122,6 +1270,22 @@ class WorkflowApp {
       this.loadMachines();
     } else if (msg.type === 'compliance_alert') {
       this.addViolation(msg);
+    } else if (msg.type === 'version_migration' || msg.type === 'version_migration_out') {
+      if (msg.type === 'version_migration_out') {
+        const idx = this.instances.findIndex(i => i.id === msg.instanceId);
+        if (idx >= 0) {
+          this.instances.splice(idx, 1);
+          this.countInstanceState();
+          this.renderInstanceList();
+          if (this.selectedInstance === msg.instanceId) {
+            this.selectedInstance = null;
+            document.getElementById('instance-detail').innerHTML = '';
+          }
+        }
+      } else if (msg.type === 'version_migration' && this.selectedMachine === msg.targetMachineId) {
+        this.loadInstances();
+      }
+      this.loadMachines();
     }
   }
   
@@ -1462,6 +1626,314 @@ class WorkflowApp {
     ctx.lineTo(x, y + r);
     ctx.quadraticCurveTo(x, y, x + r, y);
     ctx.closePath();
+  }
+
+  async openMigrationModal(sourceMachineId, machineName) {
+    const sourceMachine = this.machines.find(m => m.id === sourceMachineId);
+    if (!sourceMachine) {
+      toast('找不到源状态机', 'error');
+      return;
+    }
+
+    this.migrationSourceMachine = sourceMachine;
+    this.migrationTargetMachineId = null;
+    this.migrationSelectedInstances.clear();
+    this.migrationCheckResult = null;
+
+    try {
+      const [versionsRes, instancesRes] = await Promise.all([
+        fetch(API_BASE + '/api/machines/' + encodeURIComponent(machineName) + '/versions'),
+        fetch(API_BASE + '/api/machines/' + sourceMachineId + '/instances')
+      ]);
+
+      const allVersions = await versionsRes.json();
+      const allInstances = await instancesRes.json();
+
+      const targetVersions = allVersions.filter(m => m.id !== sourceMachineId);
+
+      if (targetVersions.length === 0) {
+        toast('没有其他版本可供迁移', 'error');
+        return;
+      }
+
+      this.migrationAllInstances = allInstances.filter(inst => !inst.isFinal);
+
+      const targetSelect = document.getElementById('migration-target-select');
+      targetSelect.innerHTML = '<option value="">-- 请选择目标版本 --</option>' +
+        targetVersions.map(m => `
+          <option value="${escapeHtml(m.id)}">
+            v${m.version} ${m.version > sourceMachine.version ? '(更新)' : '(更旧')} · ${new Date(m.createdAt).toLocaleString()}
+          </option>
+        `).join('');
+
+      document.getElementById('migration-source-info').innerHTML = `
+        <strong>${escapeHtml(sourceMachine.name)}</strong> · v${sourceMachine.version} · ${this.migrationAllInstances.length} 个运行中实例
+      `;
+
+      this.renderMigrationInstanceList();
+      this.showMigrationStep('select');
+      document.getElementById('migration-modal').style.display = 'flex';
+    } catch (e) {
+      toast('打开迁移对话框失败: ' + e.message, 'error');
+    }
+  }
+
+  closeMigrationModal() {
+    document.getElementById('migration-modal').style.display = 'none';
+    this.migrationSourceMachine = null;
+    this.migrationTargetMachineId = null;
+    this.migrationSelectedInstances.clear();
+    this.migrationCheckResult = null;
+  }
+
+  showMigrationStep(step) {
+    document.getElementById('migration-step-select').style.display = step === 'select' ? 'block' : 'none';
+    document.getElementById('migration-step-check').style.display = step === 'check' ? 'block' : 'none';
+    document.getElementById('migration-step-execute').style.display = step === 'execute' ? 'block' : 'none';
+  }
+
+  onTargetVersionChange(targetMachineId) {
+    this.migrationTargetMachineId = targetMachineId || null;
+    document.getElementById('btn-check-migration').disabled = !targetMachineId || this.migrationSelectedInstances.size === 0;
+  }
+
+  renderMigrationInstanceList() {
+    const container = document.getElementById('migration-instance-list');
+    const instances = this.migrationAllInstances || [];
+
+    if (instances.length === 0) {
+      container.innerHTML = '<div style="text-align:center;color:#8c8c8c;padding:20px;">暂无运行中实例</div>';
+      return;
+    }
+
+    const selectAllChecked = this.migrationSelectedInstances.size === instances.length;
+
+    container.innerHTML = `
+      <div class="select-all-bar">
+        <label>
+          <input type="checkbox" id="select-all-instances" ${selectAllChecked ? 'checked' : ''}>
+          全选 (${this.migrationSelectedInstances.size}/${instances.length})
+        </label>
+      </div>
+      ${instances.map(inst => {
+        const state = this.migrationSourceMachine && this.migrationSourceMachine.definition 
+          ? this.migrationSourceMachine.definition.states.find(s => s.id === inst.currentStateId)
+          : null;
+        const stateName = state ? state.name : inst.currentStateId;
+        const isSelected = this.migrationSelectedInstances.has(inst.id);
+        return `
+          <div class="migration-instance-item ${isSelected ? 'selected' : ''}" data-id="${escapeHtml(inst.id)}">
+            <input type="checkbox" data-instance="${escapeHtml(inst.id)}" ${isSelected ? 'checked' : ''}>
+            <div class="instance-item-info">
+              <div class="instance-item-id">${escapeHtml(inst.id)}</div>
+              <div class="instance-item-state">当前状态: ${escapeHtml(stateName)}</div>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    `;
+
+    document.getElementById('select-all-instances').onchange = (e) => {
+      if (e.target.checked) {
+        instances.forEach(inst => this.migrationSelectedInstances.add(inst.id));
+      } else {
+        this.migrationSelectedInstances.clear();
+      }
+      this.renderMigrationInstanceList();
+    };
+
+    container.querySelectorAll('input[data-instance]').forEach(checkbox => {
+      checkbox.onchange = (e) => {
+        e.stopPropagation();
+        const instanceId = e.target.dataset.instance;
+        if (e.target.checked) {
+          this.migrationSelectedInstances.add(instanceId);
+        } else {
+          this.migrationSelectedInstances.delete(instanceId);
+        }
+        this.renderMigrationInstanceList();
+      };
+    });
+
+    container.querySelectorAll('.migration-instance-item').forEach(item => {
+      item.onclick = (e) => {
+        if (e.target.type === 'checkbox') return;
+        const instanceId = item.dataset.id;
+        if (this.migrationSelectedInstances.has(instanceId)) {
+          this.migrationSelectedInstances.delete(instanceId);
+        } else {
+          this.migrationSelectedInstances.add(instanceId);
+        }
+        this.renderMigrationInstanceList();
+      };
+    });
+
+    document.getElementById('btn-check-migration').disabled = 
+      !this.migrationTargetMachineId || this.migrationSelectedInstances.size === 0;
+  }
+
+  async checkMigration() {
+    if (!this.migrationSourceMachine || !this.migrationTargetMachineId || this.migrationSelectedInstances.size === 0) {
+      return;
+    }
+
+    try {
+      const res = await fetch(API_BASE + '/api/migration/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceMachineId: this.migrationSourceMachine.id,
+          targetMachineId: this.migrationTargetMachineId,
+          instanceIds: [...this.migrationSelectedInstances]
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error);
+      }
+
+      this.migrationCheckResult = await res.json();
+      this.renderCheckResult();
+      this.showMigrationStep('check');
+    } catch (e) {
+      toast('检查失败: ' + e.message, 'error');
+    }
+  }
+
+  renderCheckResult() {
+    const result = this.migrationCheckResult;
+    if (!result) return;
+
+    document.getElementById('check-migratable-count').textContent = result.migratableCount;
+    document.getElementById('check-blocked-count').textContent = result.blockedCount;
+    
+    const warningCount = result.instances.filter(r => r.warnings && r.warnings.length > 0 && r.canMigrate).length;
+    document.getElementById('check-warning-count').textContent = warningCount;
+
+    const container = document.getElementById('migration-check-results');
+    container.innerHTML = result.instances.map(inst => {
+      const sourceMachine = this.machines.find(m => m.id === result.sourceMachine.id);
+      const state = sourceMachine && sourceMachine.definition
+        ? sourceMachine.definition.states.find(s => s.id === inst.currentStateId)
+        : null;
+      const stateName = state ? state.name : inst.currentStateId;
+
+      return `
+        <div class="check-result-item">
+          <div class="result-header">
+            <span class="result-id">${escapeHtml(inst.instanceId)} · ${escapeHtml(stateName)}</span>
+            <span class="result-status ${inst.canMigrate ? 'status-migratable' : 'status-blocked'}">
+              ${inst.canMigrate ? '可迁移' : '不可迁移'}
+            </span>
+          </div>
+          ${inst.reason ? `<div class="result-reason">${escapeHtml(inst.reason)}</div>` : ''}
+          ${inst.warnings && inst.warnings.length > 0 ? `
+            <div class="result-warnings">
+              ${inst.warnings.map(w => `<div>⚠️ ${escapeHtml(w)}</div>`).join('')}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }).join('');
+  }
+
+  async executeMigration() {
+    if (!this.migrationCheckResult) return;
+
+    const migratableIds = this.migrationCheckResult.instances
+      .filter(r => r.canMigrate)
+      .map(r => r.instanceId);
+
+    if (migratableIds.length === 0) {
+      toast('没有可迁移的实例', 'error');
+      return;
+    }
+
+    if (!confirm(`确认将 ${migratableIds.length} 个实例从 v${this.migrationCheckResult.sourceMachine.version} 迁移到 v${this.migrationCheckResult.targetMachine.version}？`)) {
+      return;
+    }
+
+    this.showMigrationStep('execute');
+    document.getElementById('migration-progress-fill').style.width = '10%';
+    document.getElementById('migration-progress-text').textContent = `正在迁移 0/${migratableIds.length}...`;
+
+    try {
+      const res = await fetch(API_BASE + '/api/migration/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceMachineId: this.migrationCheckResult.sourceMachine.id,
+          targetMachineId: this.migrationCheckResult.targetMachine.id,
+          instanceIds: migratableIds,
+          operator: 'user'
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error);
+      }
+
+      const executeResult = await res.json();
+      
+      document.getElementById('migration-progress-fill').style.width = '100%';
+      document.getElementById('migration-progress-text').textContent = 
+        `完成: ${executeResult.successCount} 成功, ${executeResult.failedCount} 失败`;
+
+      this.renderExecuteResult(executeResult);
+      
+      await this.loadMachines();
+      if (this.selectedMachine) {
+        await this.loadInstances();
+      }
+    } catch (e) {
+      document.getElementById('migration-progress-text').textContent = '迁移失败: ' + e.message;
+      toast('迁移失败: ' + e.message, 'error');
+    }
+  }
+
+  renderExecuteResult(result) {
+    const container = document.getElementById('migration-execute-results');
+    container.innerHTML = result.results.map(r => {
+      const sourceMachine = this.machines.find(m => m.id === result.sourceMachine.id);
+      const targetMachine = this.machines.find(m => m.id === result.targetMachine.id);
+      
+      let fromStateName = r.fromStateId;
+      let toStateName = r.toStateId;
+      
+      if (sourceMachine && sourceMachine.definition) {
+        const fromState = sourceMachine.definition.states.find(s => s.id === r.fromStateId);
+        if (fromState) fromStateName = fromState.name;
+      }
+      if (targetMachine && targetMachine.definition) {
+        const toState = targetMachine.definition.states.find(s => s.id === r.toStateId);
+        if (toState) toStateName = toState.name;
+      }
+
+      return `
+        <div class="execute-result-item">
+          <div class="result-header">
+            <span class="result-id">${escapeHtml(r.instanceId)}</span>
+            <span class="result-status ${r.success ? 'status-success' : 'status-failed'}">
+              ${r.success ? '成功' : '失败'}
+            </span>
+          </div>
+          ${r.success ? `
+            <div style="font-size:12px;color:#52c41a;">
+              ${escapeHtml(fromStateName)} → ${escapeHtml(toStateName)}
+            </div>
+          ` : `
+            <div class="result-reason">${escapeHtml(r.error)}</div>
+          `}
+          ${r.warnings && r.warnings.length > 0 ? `
+            <div class="result-warnings">
+              ${r.warnings.map(w => `<div>⚠️ ${escapeHtml(w)}</div>`).join('')}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }).join('');
   }
 }
 

@@ -143,6 +143,79 @@
     </div>
   </div>
 
+  <div id="migration-modal" class="modal-overlay" style="display:none;">
+    <div class="modal" style="max-width: 900px; max-height: 85vh;">
+      <div class="modal-header">
+        <h2>🔄 版本迁移</h2>
+        <button id="btn-close-migration" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body" id="migration-body">
+        <div id="migration-step-select">
+          <div class="migration-info">
+            <div class="info-block">
+              <label>源版本</label>
+              <div id="migration-source-info" class="info-value"></div>
+            </div>
+            <div class="info-block">
+              <label>目标版本</label>
+              <select id="migration-target-select" class="form-control">
+                <option value="">-- 请选择目标版本 --</option>
+              </select>
+            </div>
+          </div>
+          <div class="migration-instances">
+            <h4>待迁移实例 <small class="text-muted">（仅显示运行中实例）</small></h4>
+            <div id="migration-instance-list" class="migration-instance-list"></div>
+          </div>
+          <div class="migration-actions">
+            <button id="btn-check-migration" class="btn btn-primary" disabled>检查可迁移性</button>
+          </div>
+        </div>
+
+        <div id="migration-step-check" style="display:none;">
+          <div class="migration-summary">
+            <div class="summary-card summary-success">
+              <div class="summary-count" id="check-migratable-count">0</div>
+              <div class="summary-label">可迁移</div>
+            </div>
+            <div class="summary-card summary-danger">
+              <div class="summary-count" id="check-blocked-count">0</div>
+              <div class="summary-label">不可迁移</div>
+            </div>
+            <div class="summary-card summary-info">
+              <div class="summary-count" id="check-warning-count">0</div>
+              <div class="summary-label">有警告</div>
+            </div>
+          </div>
+          <div class="migration-result-list">
+            <h4>检查结果</h4>
+            <div id="migration-check-results" class="check-results"></div>
+          </div>
+          <div class="migration-actions">
+            <button id="btn-back-to-select" class="btn">返回选择</button>
+            <button id="btn-execute-migration" class="btn btn-primary">确认执行迁移</button>
+          </div>
+        </div>
+
+        <div id="migration-step-execute" style="display:none;">
+          <div class="migration-progress">
+            <div class="progress-bar">
+              <div class="progress-fill" id="migration-progress-fill" style="width: 0%"></div>
+            </div>
+            <div class="progress-text" id="migration-progress-text">准备执行...</div>
+          </div>
+          <div class="migration-result-list">
+            <h4>执行结果</h4>
+            <div id="migration-execute-results" class="execute-results"></div>
+          </div>
+          <div class="migration-actions">
+            <button id="btn-close-migration-result" class="btn btn-primary">完成</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="js/app.js"></script>
 </body>
 </html>

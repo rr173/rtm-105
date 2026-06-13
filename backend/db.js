@@ -158,6 +158,32 @@ function initDB() {
         CREATE INDEX IF NOT EXISTS idx_compliance_violations_instance ON compliance_violations(instance_id);
         CREATE INDEX IF NOT EXISTS idx_compliance_violations_policy ON compliance_violations(policy_id);
         CREATE INDEX IF NOT EXISTS idx_compliance_violations_attempted ON compliance_violations(attempted_at);
+
+        CREATE TABLE IF NOT EXISTS instance_migrations (
+          id TEXT PRIMARY KEY,
+          instance_id TEXT NOT NULL,
+          source_machine_id TEXT NOT NULL,
+          target_machine_id TEXT NOT NULL,
+          source_version INTEGER NOT NULL,
+          target_version INTEGER NOT NULL,
+          from_state_id TEXT NOT NULL,
+          to_state_id TEXT,
+          context_before TEXT NOT NULL,
+          context_after TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          warnings TEXT,
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          operator TEXT NOT NULL DEFAULT 'system',
+          FOREIGN KEY (instance_id) REFERENCES instances(id),
+          FOREIGN KEY (source_machine_id) REFERENCES machines(id),
+          FOREIGN KEY (target_machine_id) REFERENCES machines(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_instance_migrations_instance ON instance_migrations(instance_id);
+        CREATE INDEX IF NOT EXISTS idx_instance_migrations_source ON instance_migrations(source_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_instance_migrations_target ON instance_migrations(target_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_instance_migrations_created ON instance_migrations(created_at);
       `, async (err) => {
         if (err) return reject(err);
         try {

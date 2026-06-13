@@ -31,6 +31,14 @@ const {
   auditInstanceHistory,
   auditCompletedInstances
 } = require('./compliance-engine');
+const {
+  getMachineVersionsByName,
+  checkMigratable,
+  executeMigration,
+  getMigrationHistory,
+  getMachinesGroupedByName,
+  getMachineById
+} = require('./version-migration');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -105,18 +113,6 @@ wss.on('connection', (ws) => {
   });
 });
 
-async function getMachineById(id) {
-  const row = await get('SELECT * FROM machines WHERE id = ?', [id]);
-  if (!row) return null;
-  return {
-    id: row.id,
-    name: row.name,
-    version: row.version,
-    createdAt: row.created_at,
-    definition: JSON.parse(row.definition)
-  };
-}
-
 app.get('/api/machines', async (req, res) => {
   try {
     const rows = await all('SELECT * FROM machines ORDER BY created_at DESC');
@@ -183,6 +179,24 @@ app.post('/api/machines', async (req, res) => {
   }
 });
 
+app.get('/api/machines/grouped', async (req, res) => {
+  try {
+    const groups = await getMachinesGroupedByName();
+    res.json(groups);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:name/versions', async (req, res) => {
+  try {
+    const versions = await getMachineVersionsByName(req.params.name);
+    res.json(versions);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/machines/:machineId/instances', async (req, res) => {
   try {
     const machine = await getMachineById(req.params.machineId);
@@ -196,6 +210,7 @@ app.get('/api/machines/:machineId/instances', async (req, res) => {
     const instances = rows.map(row => ({
       id: row.id,
       machineId: row.machine_id,
+      machineVersion: machine.version,
       currentStateId: row.current_state_id,
       context: JSON.parse(row.context_data),
       createdAt: row.created_at,
@@ -254,6 +269,7 @@ app.get('/api/instances/:id', async (req, res) => {
     if (!row) return res.status(404).json({ error: 'Instance not found' });
 
     const machine = await getMachineById(row.machine_id);
+    const migrationHistory = await getMigrationHistory(req.params.id);
 
     const historyRows = await all(
       'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
@@ -273,15 +289,84 @@ app.get('/api/instances/:id', async (req, res) => {
     res.json({
       id: row.id,
       machineId: row.machine_id,
+      machineVersion: machine ? machine.version : null,
+      machineName: machine ? machine.name : null,
       currentStateId: row.current_state_id,
       context: JSON.parse(row.context_data),
       createdAt: row.created_at,
       isFinal: !!row.is_final,
       timeoutInfo: buildTimeoutInfo(row.id, machine ? machine.definition : null, row.current_state_id, row.entered_state_at),
-      history
+      history,
+      migrationHistory
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/migration/check', async (req, res) => {
+  try {
+    const { sourceMachineId, targetMachineId, instanceIds } = req.body;
+    if (!sourceMachineId || !targetMachineId) {
+      return res.status(400).json({ error: 'sourceMachineId and targetMachineId are required' });
+    }
+
+    const result = await checkMigratable(sourceMachineId, targetMachineId, instanceIds);
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/migration/execute', async (req, res) => {
+  try {
+    const { sourceMachineId, targetMachineId, instanceIds, operator } = req.body;
+    if (!sourceMachineId || !targetMachineId || !instanceIds || !Array.isArray(instanceIds)) {
+      return res.status(400).json({ error: 'sourceMachineId, targetMachineId, and instanceIds array are required' });
+    }
+
+    const result = await executeMigration(
+      sourceMachineId,
+      targetMachineId,
+      instanceIds,
+      operator || 'user'
+    );
+
+    for (const event of result.broadcastEvents) {
+      broadcastToMachine(event.targetMachineId, {
+        type: 'version_migration',
+        migrationId: event.migrationId,
+        instanceId: event.instanceId,
+        sourceMachineId: event.sourceMachineId,
+        targetMachineId: event.targetMachineId,
+        fromStateId: event.fromStateId,
+        toStateId: event.toStateId,
+        timestamp: event.timestamp,
+        warnings: event.warnings
+      });
+
+      broadcastToMachine(event.sourceMachineId, {
+        type: 'version_migration_out',
+        migrationId: event.migrationId,
+        instanceId: event.instanceId,
+        sourceMachineId: event.sourceMachineId,
+        targetMachineId: event.targetMachineId,
+        fromStateId: event.fromStateId,
+        toStateId: event.toStateId,
+        timestamp: event.timestamp
+      });
+    }
+
+    res.json({
+      sourceMachine: result.sourceMachine,
+      targetMachine: result.targetMachine,
+      total: result.total,
+      successCount: result.successCount,
+      failedCount: result.failedCount,
+      results: result.results
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
   }
 });
 
