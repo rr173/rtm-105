@@ -184,6 +184,63 @@ function initDB() {
         CREATE INDEX IF NOT EXISTS idx_instance_migrations_source ON instance_migrations(source_machine_id);
         CREATE INDEX IF NOT EXISTS idx_instance_migrations_target ON instance_migrations(target_machine_id);
         CREATE INDEX IF NOT EXISTS idx_instance_migrations_created ON instance_migrations(created_at);
+
+        CREATE TABLE IF NOT EXISTS simulations (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          source_type TEXT NOT NULL,
+          source_machine_id TEXT,
+          source_instance_id TEXT,
+          source_snapshot TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          is_archived INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS simulation_branches (
+          id TEXT PRIMARY KEY,
+          simulation_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          machine_id TEXT NOT NULL,
+          machine_snapshot TEXT NOT NULL,
+          policies_snapshot TEXT,
+          parent_branch_id TEXT,
+          parent_step_id TEXT,
+          current_state_id TEXT NOT NULL,
+          context_data TEXT NOT NULL,
+          entered_state_at TEXT,
+          is_final INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (simulation_id) REFERENCES simulations(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS simulation_steps (
+          id TEXT PRIMARY KEY,
+          branch_id TEXT NOT NULL,
+          step_index INTEGER NOT NULL,
+          step_type TEXT NOT NULL,
+          from_state_id TEXT,
+          to_state_id TEXT,
+          event_name TEXT,
+          payload_snapshot TEXT,
+          guard_result TEXT,
+          compliance_result TEXT,
+          timeout_info TEXT,
+          context_before TEXT,
+          context_after TEXT,
+          duration_ms INTEGER,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (branch_id) REFERENCES simulation_branches(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_simulations_source_machine ON simulations(source_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_simulations_source_instance ON simulations(source_instance_id);
+        CREATE INDEX IF NOT EXISTS idx_simulations_created ON simulations(created_at);
+        CREATE INDEX IF NOT EXISTS idx_simulation_branches_simulation ON simulation_branches(simulation_id);
+        CREATE INDEX IF NOT EXISTS idx_simulation_branches_parent ON simulation_branches(parent_branch_id);
+        CREATE INDEX IF NOT EXISTS idx_simulation_steps_branch ON simulation_steps(branch_id);
+        CREATE INDEX IF NOT EXISTS idx_simulation_steps_branch_index ON simulation_steps(branch_id, step_index);
       `, async (err) => {
         if (err) return reject(err);
         try {

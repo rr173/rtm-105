@@ -1937,6 +1937,1368 @@ class WorkflowApp {
   }
 }
 
+class SimulationLab {
+  constructor() {
+    this.currentSimulation = null;
+    this.currentBranchId = null;
+    this.branches = [];
+    this.compareMode = false;
+    this.compareBranchA = null;
+    this.compareBranchB = null;
+    this.isPlaying = false;
+    this.playInterval = null;
+    this.bindEvents();
+  }
+
+  bindEvents() {
+    document.getElementById('btn-open-simulation').addEventListener('click', () => this.openModal());
+    document.getElementById('btn-close-simulation').addEventListener('click', () => this.closeModal());
+    document.getElementById('btn-create-simulation').addEventListener('click', () => this.showCreateView());
+    document.getElementById('btn-back-to-list').addEventListener('click', () => this.showListView());
+    document.getElementById('btn-back-to-list-from-detail').addEventListener('click', () => this.showListView());
+    document.getElementById('btn-delete-simulation').addEventListener('click', () => this.deleteSimulation());
+    document.getElementById('btn-refresh-source').addEventListener('click', () => this.refreshSource());
+    document.getElementById('btn-new-from-latest').addEventListener('click', () => this.createBranchFromLatest());
+    document.getElementById('btn-submit-create-simulation').addEventListener('click', () => this.createSimulation());
+    document.getElementById('btn-play-all').addEventListener('click', () => this.togglePlayback());
+    document.getElementById('btn-reset').addEventListener('click', () => this.resetTimeline());
+    document.getElementById('btn-sim-send-event').addEventListener('click', () => this.sendEvent());
+    document.getElementById('btn-sim-timeout').addEventListener('click', () => this.simulateTimeout());
+    document.getElementById('btn-add-branch').addEventListener('click', () => this.openForkModal());
+    document.getElementById('btn-close-fork').addEventListener('click', () => this.closeForkModal());
+    document.getElementById('btn-cancel-fork').addEventListener('click', () => this.closeForkModal());
+    document.getElementById('btn-confirm-fork').addEventListener('click', () => this.confirmFork());
+    document.getElementById('enable-compare').addEventListener('change', (e) => this.toggleCompareMode(e.target.checked));
+    document.getElementById('btn-run-compare').addEventListener('click', () => this.runComparison());
+    document.getElementById('simulation-search').addEventListener('input', (e) => this.filterSimulations(e.target.value));
+    
+    document.querySelectorAll('input[name="sourceType"]').forEach(radio => {
+      radio.addEventListener('change', (e) => this.toggleSourceType(e.target.value));
+    });
+    
+    document.getElementById('simulation-machine-select').addEventListener('change', (e) => this.loadInstancesForMachine(e.target.value));
+  }
+
+  async openModal() {
+    document.getElementById('simulation-modal').style.display = 'flex';
+    await this.showListView();
+    await this.loadPublishedMachines();
+  }
+
+  closeModal() {
+    document.getElementById('simulation-modal').style.display = 'none';
+    this.stopPlayback();
+  }
+
+  showView(viewId) {
+    document.querySelectorAll('.simulation-view').forEach(v => v.style.display = 'none');
+    document.getElementById(viewId).style.display = 'flex';
+  }
+
+  async showListView() {
+    this.showView('simulation-list-view');
+    await this.loadSimulations();
+  }
+
+  showCreateView() {
+    this.showView('simulation-create-view');
+    document.getElementById('simulation-name').value = '';
+    document.getElementById('simulation-machine-select').value = '';
+    document.getElementById('simulation-instance-select').value = '';
+    document.querySelector('input[name="sourceType"][value="machine"]').checked = true;
+    this.toggleSourceType('machine');
+  }
+
+  async showDetailView(simulationId) {
+    this.showView('simulation-detail-view');
+    await this.loadSimulationDetail(simulationId);
+  }
+
+  toggleSourceType(type) {
+    if (type === 'machine') {
+      document.getElementById('machine-select-section').style.display = 'block';
+      document.getElementById('instance-select-section').style.display = 'none';
+    } else {
+      document.getElementById('machine-select-section').style.display = 'block';
+      document.getElementById('instance-select-section').style.display = 'block';
+    }
+  }
+
+  async loadPublishedMachines() {
+    try {
+      const res = await fetch('/api/machines?status=published');
+      const machines = await res.json();
+      const select = document.getElementById('simulation-machine-select');
+      select.innerHTML = '<option value="">-- 请选择状态机 --</option>';
+      machines.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = `${m.name} (v${m.version})`;
+        select.appendChild(opt);
+      });
+      
+      const forkSelect = document.getElementById('fork-machine-select');
+      forkSelect.innerHTML = '<option value="">-- 使用当前版本 --</option>';
+      machines.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = `${m.name} (v${m.version})`;
+        forkSelect.appendChild(opt);
+      });
+    } catch (e) {
+      console.error('加载状态机失败:', e);
+    }
+  }
+
+  async loadInstancesForMachine(machineId) {
+    const instanceSelect = document.getElementById('simulation-instance-select');
+    instanceSelect.innerHTML = '<option value="">-- 加载中... --</option>';
+    
+    if (!machineId) {
+      instanceSelect.innerHTML = '<option value="">-- 请先选择状态机 --</option>';
+      return;
+    }
+    
+    try {
+      const res = await fetch(`/api/machines/${machineId}/instances`);
+      const instances = await res.json();
+      instanceSelect.innerHTML = '<option value="">-- 请选择运行实例 --</option>';
+      instances.forEach(inst => {
+        const opt = document.createElement('option');
+        opt.value = inst.id;
+        const currentState = inst.current_state_id || 'unknown';
+        const status = inst.status || 'running';
+        opt.textContent = `实例 ${inst.id.slice(0, 8)}... - ${currentState} (${status})`;
+        instanceSelect.appendChild(opt);
+      });
+    } catch (e) {
+      console.error('加载实例失败:', e);
+      instanceSelect.innerHTML = '<option value="">-- 加载失败 --</option>';
+    }
+  }
+
+  async loadSimulations() {
+    const container = document.getElementById('simulation-list');
+    container.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;">加载中...</div>';
+    
+    try {
+      const res = await fetch('/api/simulations');
+      const simulations = await res.json();
+      this.allSimulations = simulations;
+      this.renderSimulationList(simulations);
+    } catch (e) {
+      container.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:#ff4d4f;">加载失败</div>';
+      console.error(e);
+    }
+  }
+
+  filterSimulations(keyword) {
+    if (!this.allSimulations) return;
+    const filtered = this.allSimulations.filter(s => 
+      s.name.toLowerCase().includes(keyword.toLowerCase()) ||
+      (s.source_type === 'machine' ? '状态机' : '实例').includes(keyword)
+    );
+    this.renderSimulationList(filtered);
+  }
+
+  renderSimulationList(simulations) {
+    const container = document.getElementById('simulation-list');
+    if (simulations.length === 0) {
+      container.innerHTML = `
+        <div class="simulation-empty">
+          <div class="simulation-empty-icon">🔬</div>
+          <div style="font-size:16px;margin-bottom:8px;">还没有推演记录</div>
+          <div style="font-size:13px;">点击上方 "新建推演" 按钮开始第一次推演</div>
+        </div>
+      `;
+      return;
+    }
+    
+    container.innerHTML = simulations.map(s => `
+      <div class="simulation-card" data-id="${s.id}">
+        <div class="simulation-card-header">
+          <div class="simulation-card-name">${escapeHtml(s.name)}</div>
+          <span class="simulation-card-type">${s.source_type === 'machine' ? '📋 状态机' : '🚀 实例'}</span>
+        </div>
+        <div class="simulation-card-meta">
+          ${s.source_type === 'machine' 
+            ? `来源状态机: ${escapeHtml(s.source_machine_id || '-')}`
+            : `来源实例: ${escapeHtml(s.source_instance_id || '-')}`
+          }
+        </div>
+        <div class="simulation-card-stats">
+          <div class="simulation-card-stat">📂 <strong>${s.branch_count || 0}</strong> 分支</div>
+          <div class="simulation-card-stat">⚡ <strong>${s.step_count || 0}</strong> 步骤</div>
+          <div class="simulation-card-stat">🕒 ${this.formatTime(s.created_at)}</div>
+        </div>
+      </div>
+    `).join('');
+    
+    container.querySelectorAll('.simulation-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const id = card.getAttribute('data-id');
+        this.showDetailView(id);
+      });
+    });
+  }
+
+  async createSimulation() {
+    const name = document.getElementById('simulation-name').value.trim();
+    const sourceType = document.querySelector('input[name="sourceType"]:checked').value;
+    const sourceMachineId = document.getElementById('simulation-machine-select').value;
+    const sourceInstanceId = document.getElementById('simulation-instance-select').value;
+    
+    if (!name) {
+      alert('请输入推演名称');
+      return;
+    }
+    if (!sourceMachineId) {
+      alert('请选择状态机');
+      return;
+    }
+    if (sourceType === 'instance' && !sourceInstanceId) {
+      alert('请选择运行实例');
+      return;
+    }
+    
+    try {
+      const res = await fetch('/api/simulations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, sourceType, sourceMachineId, sourceInstanceId })
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      
+      await this.showDetailView(result.simulation.id);
+    } catch (e) {
+      alert('创建推演失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  async loadSimulationDetail(simulationId) {
+    try {
+      const res = await fetch(`/api/simulations/${simulationId}`);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      
+      this.currentSimulation = data.simulation;
+      this.branches = data.branches || [];
+      
+      document.getElementById('simulation-detail-title').textContent = this.currentSimulation.name;
+      document.getElementById('simulation-detail-meta').textContent = 
+        `${this.currentSimulation.source_type === 'machine' ? '📋 状态机来源' : '🚀 实例来源'} · 创建于 ${this.formatTime(this.currentSimulation.created_at)}`;
+      
+      if (this.currentSimulation.source_type === 'instance') {
+        document.getElementById('btn-refresh-source').style.display = 'inline-block';
+        document.getElementById('btn-new-from-latest').style.display = 'inline-block';
+      } else {
+        document.getElementById('btn-refresh-source').style.display = 'none';
+        document.getElementById('btn-new-from-latest').style.display = 'none';
+      }
+      
+      this.renderBranches();
+      
+      if (this.branches.length > 0) {
+        await this.selectBranch(this.branches[0].id);
+      }
+      
+      this.updateCompareSelectors();
+    } catch (e) {
+      alert('加载推演详情失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  renderBranches() {
+    const container = document.getElementById('simulation-branches-list');
+    container.innerHTML = this.branches.map(b => {
+      const parentBranch = this.branches.find(p => p.id === b.parent_branch_id);
+      const badgeClass = b.parent_branch_id ? (b.is_refresh ? 'badge-refresh' : 'badge-fork') : 'badge-main';
+      const badgeText = b.parent_branch_id ? (b.is_refresh ? '最新快照' : '分叉') : '主分支';
+      const parentInfo = parentBranch 
+        ? `<div class="branch-item-parent">← ${escapeHtml(parentBranch.name)}${b.parent_step_id ? ` #${b.parent_step_index || ''}` : ''}</div>`
+        : '';
+      
+      return `
+        <div class="branch-item ${b.id === this.currentBranchId ? 'active' : ''}" data-id="${b.id}">
+          <div class="branch-item-name">
+            ${escapeHtml(b.name)}
+            <span class="branch-item-badge ${badgeClass}">${badgeText}</span>
+          </div>
+          <div class="branch-item-meta">
+            ${b.step_count || 0} 步 · ${b.is_final ? '🏁 已结束' : '▶️ 运行中'}
+          </div>
+          ${parentInfo}
+        </div>
+      `;
+    }).join('');
+    
+    container.querySelectorAll('.branch-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const id = item.getAttribute('data-id');
+        this.selectBranch(id);
+      });
+    });
+  }
+
+  async selectBranch(branchId) {
+    this.currentBranchId = branchId;
+    this.renderBranches();
+    this.renderCurrentBranchIndicator();
+    await this.loadBranchDetail(branchId);
+  }
+
+  renderCurrentBranchIndicator() {
+    const branch = this.branches.find(b => b.id === this.currentBranchId);
+    if (branch) {
+      document.getElementById('current-branch-indicator').textContent = 
+        `当前分支: ${branch.name}`;
+    }
+  }
+
+  async loadBranchDetail(branchId) {
+    try {
+      const res = await fetch(`/api/simulations/branches/${branchId}`);
+      const branch = await res.json();
+      if (branch.error) throw new Error(branch.error);
+      
+      const idx = this.branches.findIndex(b => b.id === branchId);
+      if (idx !== -1) {
+        this.branches[idx] = branch;
+      }
+      
+      this.renderTimeline(branch.steps || []);
+      this.renderCurrentState(branch);
+      this.renderAvailableEvents(branch);
+      this.renderTimeoutInfo(branch);
+      this.drawSimulationCanvas(branch, 'a');
+      
+      if (this.compareMode && this.compareBranchB) {
+        await this.loadBranchForCompare(this.compareBranchB, 'b');
+      }
+    } catch (e) {
+      console.error('加载分支详情失败:', e);
+    }
+  }
+
+  renderTimeline(steps) {
+    const container = document.getElementById('simulation-timeline');
+    
+    if (steps.length === 0) {
+      container.innerHTML = '<div style="text-align:center;padding:20px;color:#8c8c8c;">暂无步骤记录</div>';
+      return;
+    }
+    
+    container.innerHTML = steps.map((step, idx) => this.renderTimelineStep(step, idx)).join('');
+    
+    container.querySelectorAll('.timeline-step').forEach(stepEl => {
+      stepEl.addEventListener('click', () => {
+        const stepId = stepEl.getAttribute('data-id');
+        this.highlightTimelineStep(stepId);
+      });
+    });
+    
+    const lastStep = container.querySelector('.timeline-step:last-child');
+    if (lastStep) {
+      lastStep.classList.add('active');
+    }
+  }
+
+  renderTimelineStep(step, idx) {
+    const type = step.step_type || 'transition';
+    let typeLabel = type;
+    let icon = '⚡';
+    
+    switch (type) {
+      case 'initial': typeLabel = '初始状态'; icon = '🌱'; break;
+      case 'fork': typeLabel = '分叉创建'; icon = '🌿'; break;
+      case 'transition': typeLabel = '事件流转'; icon = '➡️'; break;
+      case 'timeout_wait': typeLabel = '超时等待'; icon = '⏳'; break;
+      case 'timeout': typeLabel = '超时触发'; icon = '⏰'; break;
+      case 'refresh': typeLabel = '同步快照'; icon = '🔄'; break;
+    }
+    
+    const guardResult = step.guard_result ? JSON.parse(step.guard_result) : null;
+    const complianceResult = step.compliance_result ? JSON.parse(step.compliance_result) : null;
+    const timeoutInfo = step.timeout_info ? JSON.parse(step.timeout_info) : null;
+    
+    let extraClass = '';
+    if (type === 'initial') extraClass = 'initial';
+    else if (type === 'fork' || type === 'refresh') extraClass = 'fork';
+    else if (type === 'timeout_wait') extraClass = 'timeout_wait';
+    else if (type === 'timeout') extraClass = 'timeout';
+    
+    if (guardResult && !guardResult.passed) extraClass += ' guard-failed';
+    if (complianceResult && complianceResult.blocked) extraClass += ' compliance-blocked';
+    
+    let detail = '';
+    if (guardResult) {
+      detail += `<div class="timeline-step-detail">`;
+      detail += `<span class="${guardResult.passed ? 'guard-pass' : 'guard-fail'}">`;
+      detail += `🛡️ 守卫: ${guardResult.passed ? '放行' : '拦截'}`;
+      if (guardResult.reason) detail += ` - ${escapeHtml(guardResult.reason)}`;
+      detail += `</span>`;
+      detail += `</div>`;
+    }
+    
+    if (complianceResult) {
+      detail += `<div class="timeline-step-detail">`;
+      detail += `<span class="violation">`;
+      detail += `⚖️ 合规: ${complianceResult.blocked ? '拦截' : '通过'}`;
+      if (complianceResult.violations && complianceResult.violations.length > 0) {
+        detail += ` - ${complianceResult.violations.length} 项违规`;
+      }
+      detail += `</span>`;
+      detail += `</div>`;
+    }
+    
+    if (timeoutInfo) {
+      detail += `<div class="timeline-step-detail">`;
+      detail += `⏱️ 模拟等待 ${timeoutInfo.simulated_seconds || 0} 秒`;
+      if (timeoutInfo.triggered) {
+        detail += ` → 超时已触发`;
+      }
+      detail += `</div>`;
+    }
+    
+    const content = type === 'initial' 
+      ? `进入 <strong>${escapeHtml(step.to_state_id || '')}</strong>`
+      : type === 'fork'
+      ? `从 <strong>${escapeHtml(step.from_state_id || '')}</strong> 分叉`
+      : step.event_name 
+        ? `<strong>${escapeHtml(step.event_name)}</strong>: ${escapeHtml(step.from_state_id || '')} → <strong>${escapeHtml(step.to_state_id || step.from_state_id || '')}</strong>`
+        : `${escapeHtml(step.from_state_id || '')} → <strong>${escapeHtml(step.to_state_id || '')}</strong>`;
+    
+    return `
+      <div class="timeline-step ${extraClass}" data-id="${step.id}" data-idx="${idx}">
+        <div class="timeline-step-header">
+          <span class="timeline-step-type">${icon} ${typeLabel}</span>
+          <span class="timeline-step-time">#${idx + 1} ${this.formatTime(step.created_at)}</span>
+        </div>
+        <div class="timeline-step-content">${content}</div>
+        ${step.duration_ms != null ? `<div class="timeline-step-detail">⏱️ 耗时 ${step.duration_ms}ms</div>` : ''}
+        ${detail}
+      </div>
+    `;
+  }
+
+  highlightTimelineStep(stepId) {
+    document.querySelectorAll('.timeline-step').forEach(el => el.classList.remove('active'));
+    const stepEl = document.querySelector(`.timeline-step[data-id="${stepId}"]`);
+    if (stepEl) {
+      stepEl.classList.add('active');
+      stepEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+
+  renderCurrentState(branch) {
+    const container = document.getElementById('current-state-info');
+    const machine = branch.machine_snapshot ? JSON.parse(branch.machine_snapshot) : null;
+    const context = branch.context_data ? JSON.parse(branch.context_data) : {};
+    const state = machine ? machine.states.find(s => s.id === branch.current_state_id) : null;
+    
+    let contextStr = JSON.stringify(context);
+    if (contextStr.length > 100) {
+      contextStr = contextStr.slice(0, 100) + '...';
+    }
+    
+    container.innerHTML = `
+      <div>状态: <span class="state-name">${escapeHtml(state ? state.name : branch.current_state_id)}</span></div>
+      <div style="margin-top:4px;">ID: <code style="font-size:10px;">${escapeHtml(branch.current_state_id)}</code></div>
+      <div style="margin-top:4px;">上下文:</div>
+      <div class="context-preview">${escapeHtml(contextStr)}</div>
+      ${branch.is_final ? '<div style="margin-top:6px;color:#52c41a;font-weight:600;">🏁 已到达终态</div>' : ''}
+    `;
+  }
+
+  renderAvailableEvents(branch) {
+    const container = document.getElementById('available-events');
+    const machine = branch.machine_snapshot ? JSON.parse(branch.machine_snapshot) : null;
+    
+    if (!machine || branch.is_final) {
+      container.innerHTML = '<div style="font-size:11px;color:#8c8c8c;">已到达终态，无可用事件</div>';
+      return;
+    }
+    
+    const currentState = machine.states.find(s => s.id === branch.current_state_id);
+    if (!currentState || !currentState.transitions) {
+      container.innerHTML = '<div style="font-size:11px;color:#8c8c8c;">当前状态无可用流转</div>';
+      return;
+    }
+    
+    const events = [...new Set(currentState.transitions.map(t => t.event))];
+    
+    container.innerHTML = events.map(event => {
+      const transitions = currentState.transitions.filter(t => t.event === event);
+      const hasGuard = transitions.some(t => t.guard && t.guard.script);
+      return `
+        <span class="event-chip ${hasGuard ? 'with-guard' : ''}" data-event="${escapeHtml(event)}">
+          ${hasGuard ? '🛡️ ' : ''}${escapeHtml(event)}
+        </span>
+      `;
+    }).join('');
+    
+    container.querySelectorAll('.event-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const event = chip.getAttribute('data-event');
+        document.getElementById('sim-event-name').value = event;
+        document.getElementById('sim-event-payload').focus();
+      });
+    });
+  }
+
+  renderTimeoutInfo(branch) {
+    const container = document.getElementById('timeout-info');
+    const machine = branch.machine_snapshot ? JSON.parse(branch.machine_snapshot) : null;
+    
+    if (!machine) {
+      container.innerHTML = '';
+      return;
+    }
+    
+    const currentState = machine.states.find(s => s.id === branch.current_state_id);
+    if (!currentState || !currentState.timeout) {
+      container.innerHTML = '<span style="color:#8c8c8c;">当前状态无超时配置</span>';
+      return;
+    }
+    
+    const timeout = currentState.timeout;
+    container.innerHTML = `
+      <div>
+        <strong>⏰ 超时配置:</strong> ${timeout.seconds} 秒后触发 <code>${escapeHtml(timeout.target || '')}</code>
+      </div>
+      ${branch.entered_state_at ? `
+        <div style="margin-top:2px;">
+          进入状态时间: ${this.formatTime(branch.entered_state_at)}
+        </div>
+      ` : ''}
+    `;
+  }
+
+  drawSimulationCanvas(branch, canvasId) {
+    const canvas = document.getElementById(`simulation-canvas-${canvasId}`);
+    if (!canvas) return;
+    
+    const machine = branch.machine_snapshot ? JSON.parse(branch.machine_snapshot) : null;
+    if (!machine) return;
+    
+    const wrapper = canvas.parentElement;
+    const watermark = wrapper.querySelector('.sandbox-watermark');
+    if (!watermark) {
+      const wm = document.createElement('div');
+      wm.className = 'sandbox-watermark';
+      wm.textContent = '推演沙盘';
+      wrapper.appendChild(wm);
+    }
+    
+    const padding = 60;
+    const stateRadius = 50;
+    const levelHeight = 180;
+    const levelWidth = 250;
+    
+    const levels = this.calculateStateLevels(machine);
+    const maxLevelCount = Math.max(...levels.map(l => l.length), 1);
+    
+    canvas.width = Math.max(levels.length * levelWidth + padding * 2, wrapper.clientWidth);
+    canvas.height = Math.max(maxLevelCount * levelHeight + padding * 2, wrapper.clientHeight - 40);
+    
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    const statePositions = {};
+    levels.forEach((levelStates, levelIdx) => {
+      const levelY = padding + levelIdx * levelHeight + levelHeight / 2;
+      const totalWidth = levelStates.length * stateRadius * 3;
+      const startX = (canvas.width - totalWidth) / 2 + stateRadius * 1.5;
+      
+      levelStates.forEach((stateId, stateIdx) => {
+        const x = startX + stateIdx * stateRadius * 3;
+        statePositions[stateId] = { x, y: levelY };
+      });
+    });
+    
+    machine.states.forEach(state => {
+      const transitions = state.transitions || [];
+      transitions.forEach(trans => {
+        const from = statePositions[state.id];
+        const to = statePositions[trans.target];
+        if (from && to) {
+          this.drawTransition(ctx, from, to, trans, stateRadius, branch, state.id);
+        }
+      });
+      
+      if (state.timeout && state.timeout.target) {
+        const from = statePositions[state.id];
+        const to = statePositions[state.timeout.target];
+        if (from && to) {
+          this.drawTimeoutTransition(ctx, from, to, state.timeout, stateRadius);
+        }
+      }
+    });
+    
+    machine.states.forEach(state => {
+      const pos = statePositions[state.id];
+      if (pos) {
+        const isCurrent = state.id === branch.current_state_id;
+        const isInitial = state.id === machine.initialStateId;
+        this.drawState(ctx, pos.x, pos.y, state, stateRadius, isCurrent, isInitial);
+      }
+    });
+    
+    const labelEl = document.getElementById(`canvas-${canvasId}-label`);
+    if (labelEl) {
+      labelEl.textContent = canvasId === 'a' 
+        ? `分支 A: ${branch.name} - 当前状态: ${this.getStateName(machine, branch.current_state_id)}`
+        : `分支 B: ${branch.name} - 当前状态: ${this.getStateName(machine, branch.current_state_id)}`;
+    }
+  }
+
+  getStateName(machine, stateId) {
+    const state = machine.states.find(s => s.id === stateId);
+    return state ? state.name : stateId;
+  }
+
+  calculateStateLevels(machine) {
+    const visited = new Set();
+    const levels = [];
+    const stateLevel = {};
+    
+    const queue = [{ id: machine.initialStateId, level: 0 }];
+    
+    while (queue.length > 0) {
+      const { id, level } = queue.shift();
+      if (visited.has(id)) continue;
+      visited.add(id);
+      
+      if (!levels[level]) levels[level] = [];
+      levels[level].push(id);
+      stateLevel[id] = level;
+      
+      const state = machine.states.find(s => s.id === id);
+      if (!state) continue;
+      
+      const transitions = state.transitions || [];
+      transitions.forEach(trans => {
+        if (!visited.has(trans.target)) {
+          queue.push({ id: trans.target, level: level + 1 });
+        }
+      });
+      
+      if (state.timeout && state.timeout.target && !visited.has(state.timeout.target)) {
+        queue.push({ id: state.timeout.target, level: level + 1 });
+      }
+    }
+    
+    machine.states.forEach(state => {
+      if (!visited.has(state.id)) {
+        let maxLevel = levels.length - 1;
+        if (!levels[maxLevel + 1]) levels[maxLevel + 1] = [];
+        levels[maxLevel + 1].push(state.id);
+      }
+    });
+    
+    return levels.filter(l => l && l.length > 0);
+  }
+
+  drawState(ctx, x, y, state, radius, isCurrent, isInitial) {
+    ctx.save();
+    
+    if (isCurrent) {
+      ctx.shadowColor = '#722ed1';
+      ctx.shadowBlur = 20;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
+    }
+    
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = isCurrent ? '#722ed1' : (isInitial ? '#f6ffed' : '#ffffff');
+    ctx.fill();
+    ctx.strokeStyle = isCurrent ? '#531dab' : (isInitial ? '#52c41a' : '#d9d9d9');
+    ctx.lineWidth = isCurrent ? 3 : (isInitial ? 2 : 1.5);
+    ctx.stroke();
+    
+    if (state.type === 'final') {
+      ctx.beginPath();
+      ctx.arc(x, y, radius - 8, 0, Math.PI * 2);
+      ctx.strokeStyle = isCurrent ? '#531dab' : (isInitial ? '#52c41a' : '#8c8c8c');
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    
+    ctx.restore();
+    
+    ctx.fillStyle = isCurrent ? '#ffffff' : '#262626';
+    ctx.font = 'bold 13px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(state.name, x, y - 5);
+    
+    ctx.fillStyle = isCurrent ? 'rgba(255,255,255,0.7)' : '#8c8c8c';
+    ctx.font = '10px monospace';
+    ctx.fillText(state.id.slice(0, 8), x, y + 12);
+    
+    if (state.timeout) {
+      ctx.fillStyle = isCurrent ? '#fff7e6' : '#fffbe6';
+      ctx.font = '10px sans-serif';
+      ctx.fillText(`⏰ ${state.timeout.seconds}s`, x, y + radius + 15);
+    }
+  }
+
+  drawTransition(ctx, from, to, trans, radius, branch, fromStateId) {
+    const midX = (from.x + to.x) / 2;
+    const midY = (from.y + to.y) / 2;
+    
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    const startX = from.x + (dx / distance) * radius;
+    const startY = from.y + (dy / distance) * radius;
+    const endX = to.x - (dx / distance) * (radius + 10);
+    const endY = to.y - (dy / distance) * (radius + 10);
+    
+    const steps = branch.steps || [];
+    const isTaken = steps.some(s => 
+      s.step_type === 'transition' && 
+      s.from_state_id === fromStateId && 
+      s.to_state_id === trans.target &&
+      (!trans.event || s.event_name === trans.event)
+    );
+    
+    const guardResult = trans.guard && trans.guard.script;
+    
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.lineTo(endX, endY);
+    ctx.strokeStyle = isTaken ? '#722ed1' : (guardResult ? '#fa8c16' : '#bfbfbf');
+    ctx.lineWidth = isTaken ? 2.5 : 1.5;
+    if (isTaken) ctx.setLineDash([]);
+    else if (guardResult) ctx.setLineDash([5, 3]);
+    else ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    
+    const angle = Math.atan2(dy, dx);
+    ctx.beginPath();
+    ctx.moveTo(endX, endY);
+    ctx.lineTo(endX - 10 * Math.cos(angle - Math.PI / 6), endY - 10 * Math.sin(angle - Math.PI / 6));
+    ctx.lineTo(endX - 10 * Math.cos(angle + Math.PI / 6), endY - 10 * Math.sin(angle + Math.PI / 6));
+    ctx.closePath();
+    ctx.fillStyle = isTaken ? '#722ed1' : (guardResult ? '#fa8c16' : '#bfbfbf');
+    ctx.fill();
+    
+    ctx.save();
+    ctx.translate(midX, midY);
+    if (dx < 0) ctx.rotate(angle + Math.PI);
+    else ctx.rotate(angle);
+    
+    ctx.fillStyle = isTaken ? '#f9f0ff' : '#ffffff';
+    ctx.strokeStyle = isTaken ? '#722ed1' : '#d9d9d9';
+    ctx.lineWidth = 1;
+    const label = trans.event || '';
+    const labelWidth = ctx.measureText(label).width + 16;
+    
+    ctx.fillRect(-labelWidth / 2, -12, labelWidth, 24);
+    ctx.strokeRect(-labelWidth / 2, -12, labelWidth, 24);
+    
+    ctx.fillStyle = isTaken ? '#722ed1' : '#595959';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${guardResult ? '🛡️ ' : ''}${label}`, 0, 0);
+    
+    ctx.restore();
+  }
+
+  drawTimeoutTransition(ctx, from, to, timeout, radius) {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    const startX = from.x + (dx / distance) * radius;
+    const startY = from.y + (dy / distance) * radius;
+    const endX = to.x - (dx / distance) * (radius + 10);
+    const endY = to.y - (dy / distance) * (radius + 10);
+    
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.quadraticCurveTo(
+      (from.x + to.x) / 2 + 30,
+      (from.y + to.y) / 2 - 30,
+      endX, endY
+    );
+    ctx.strokeStyle = '#faad14';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    
+    const angle = Math.atan2(endY - ((from.y + to.y) / 2 - 30), endX - ((from.x + to.x) / 2 + 30));
+    ctx.beginPath();
+    ctx.moveTo(endX, endY);
+    ctx.lineTo(endX - 10 * Math.cos(angle - Math.PI / 6), endY - 10 * Math.sin(angle - Math.PI / 6));
+    ctx.lineTo(endX - 10 * Math.cos(angle + Math.PI / 6), endY - 10 * Math.sin(angle + Math.PI / 6));
+    ctx.closePath();
+    ctx.fillStyle = '#faad14';
+    ctx.fill();
+    
+    const midX = (from.x + to.x) / 2 + 30;
+    const midY = (from.y + to.y) / 2 - 30;
+    
+    ctx.fillStyle = '#fffbe6';
+    ctx.strokeStyle = '#faad14';
+    ctx.lineWidth = 1;
+    const label = `⏰ ${timeout.seconds}s`;
+    ctx.font = '10px sans-serif';
+    const labelWidth = ctx.measureText(label).width + 12;
+    ctx.fillRect(midX - labelWidth / 2, midY - 10, labelWidth, 20);
+    ctx.strokeRect(midX - labelWidth / 2, midY - 10, labelWidth, 20);
+    
+    ctx.fillStyle = '#fa8c16';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, midX, midY);
+  }
+
+  async sendEvent() {
+    const eventName = document.getElementById('sim-event-name').value.trim();
+    const payloadStr = document.getElementById('sim-event-payload').value.trim();
+    
+    if (!eventName) {
+      alert('请输入事件名');
+      return;
+    }
+    
+    let payload = {};
+    if (payloadStr) {
+      try {
+        payload = JSON.parse(payloadStr);
+      } catch (e) {
+        alert('Payload 必须是有效的 JSON');
+        return;
+      }
+    }
+    
+    if (!this.currentBranchId) return;
+    
+    try {
+      const res = await fetch(`/api/simulations/branches/${this.currentBranchId}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event: eventName, payload })
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      
+      document.getElementById('sim-event-payload').value = '';
+      await this.loadBranchDetail(this.currentBranchId);
+      this.renderBranches();
+      
+      if (result.step) {
+        this.highlightTimelineStep(result.step.id);
+      }
+    } catch (e) {
+      alert('发送事件失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  async simulateTimeout() {
+    const seconds = parseInt(document.getElementById('sim-timeout-seconds').value, 10);
+    if (!seconds || seconds <= 0) {
+      alert('请输入有效的秒数');
+      return;
+    }
+    
+    if (!this.currentBranchId) return;
+    
+    try {
+      const res = await fetch(`/api/simulations/branches/${this.currentBranchId}/timeout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ simulateSeconds: seconds })
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      
+      await this.loadBranchDetail(this.currentBranchId);
+      this.renderBranches();
+      
+      if (result.step) {
+        this.highlightTimelineStep(result.step.id);
+      }
+    } catch (e) {
+      alert('模拟超时失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  togglePlayback() {
+    if (this.isPlaying) {
+      this.stopPlayback();
+    } else {
+      this.startPlayback();
+    }
+  }
+
+  startPlayback() {
+    const branch = this.branches.find(b => b.id === this.currentBranchId);
+    if (!branch || !branch.steps || branch.steps.length <= 1) {
+      alert('没有足够的步骤用于回放');
+      return;
+    }
+    
+    this.isPlaying = true;
+    this.currentPlaybackIndex = 0;
+    const steps = branch.steps;
+    
+    const indicator = document.createElement('div');
+    indicator.className = 'playback-indicator';
+    indicator.id = 'playback-indicator';
+    indicator.innerHTML = `
+      <span>▶️ 回放中...</span>
+      <span id="playback-progress">1/${steps.length}</span>
+      <button onclick="window.simulationLab.stopPlayback()">停止</button>
+    `;
+    document.body.appendChild(indicator);
+    
+    this.playInterval = setInterval(() => {
+      this.currentPlaybackIndex++;
+      if (this.currentPlaybackIndex >= steps.length) {
+        this.stopPlayback();
+        return;
+      }
+      
+      const step = steps[this.currentPlaybackIndex];
+      this.highlightTimelineStep(step.id);
+      document.getElementById('playback-progress').textContent = 
+        `${this.currentPlaybackIndex + 1}/${steps.length}`;
+      
+      const machine = branch.machine_snapshot ? JSON.parse(branch.machine_snapshot) : null;
+      if (machine) {
+        const tempBranch = {
+          ...branch,
+          current_state_id: step.to_state_id || step.from_state_id
+        };
+        this.drawSimulationCanvas(tempBranch, 'a');
+      }
+    }, 800);
+  }
+
+  stopPlayback() {
+    this.isPlaying = false;
+    if (this.playInterval) {
+      clearInterval(this.playInterval);
+      this.playInterval = null;
+    }
+    
+    const indicator = document.getElementById('playback-indicator');
+    if (indicator) indicator.remove();
+    
+    if (this.currentBranchId) {
+      this.loadBranchDetail(this.currentBranchId);
+    }
+  }
+
+  resetTimeline() {
+    if (!this.currentBranchId) return;
+    
+    const branch = this.branches.find(b => b.id === this.currentBranchId);
+    if (!branch || !branch.steps || branch.steps.length === 0) return;
+    
+    const firstStep = branch.steps[0];
+    this.highlightTimelineStep(firstStep.id);
+  }
+
+  openForkModal() {
+    const branch = this.branches.find(b => b.id === this.currentBranchId);
+    if (!branch) return;
+    
+    document.getElementById('fork-branch-name').value = `${branch.name} - 分叉`;
+    
+    const stepSelect = document.getElementById('fork-step-select');
+    const steps = branch.steps || [];
+    stepSelect.innerHTML = steps.map((s, idx) => `
+      <option value="${s.id}" data-idx="${idx}">
+        #${idx + 1} - ${s.step_type || 'transition'} - ${s.to_state_id || s.from_state_id}
+      </option>
+    `).join('');
+    
+    if (steps.length > 0) {
+      stepSelect.value = steps[steps.length - 1].id;
+    }
+    
+    document.getElementById('fork-modal').style.display = 'flex';
+  }
+
+  closeForkModal() {
+    document.getElementById('fork-modal').style.display = 'none';
+  }
+
+  async confirmFork() {
+    const name = document.getElementById('fork-branch-name').value.trim();
+    const stepSelect = document.getElementById('fork-step-select');
+    const stepId = stepSelect.value;
+    const stepIdx = parseInt(stepSelect.options[stepSelect.selectedIndex].getAttribute('data-idx'), 10);
+    const machineId = document.getElementById('fork-machine-select').value;
+    
+    if (!name) {
+      alert('请输入分支名称');
+      return;
+    }
+    if (!stepId) {
+      alert('请选择分叉点');
+      return;
+    }
+    
+    if (!this.currentBranchId) return;
+    
+    try {
+      const res = await fetch(`/api/simulations/branches/${this.currentBranchId}/fork`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, stepIndex: stepIdx, targetMachineId: machineId || undefined })
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      
+      this.closeForkModal();
+      await this.loadSimulationDetail(this.currentSimulation.id);
+      await this.selectBranch(result.branch.id);
+    } catch (e) {
+      alert('创建分叉失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  async refreshSource() {
+    if (!this.currentSimulation || this.currentSimulation.source_type !== 'instance') return;
+    
+    if (!confirm('将从源实例拉取最新状态快照，确认同步？')) return;
+    
+    try {
+      const res = await fetch(`/api/simulations/branches/${this.currentBranchId}/refresh`, {
+        method: 'POST'
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      
+      alert('同步成功！已基于最新状态创建新分支');
+      await this.loadSimulationDetail(this.currentSimulation.id);
+      if (result.branch) {
+        await this.selectBranch(result.branch.id);
+      }
+    } catch (e) {
+      alert('同步失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  async createBranchFromLatest() {
+    if (!this.currentSimulation || this.currentSimulation.source_type !== 'instance') return;
+    
+    const name = prompt('请输入新分支名称:', '最新状态分支');
+    if (!name) return;
+    
+    try {
+      const res = await fetch(`/api/simulations/branches/${this.currentBranchId}/new-from-latest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      
+      alert('创建成功！');
+      await this.loadSimulationDetail(this.currentSimulation.id);
+      await this.selectBranch(result.branch.id);
+    } catch (e) {
+      alert('创建失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  async deleteSimulation() {
+    if (!this.currentSimulation) return;
+    if (!confirm(`确定要删除推演 "${this.currentSimulation.name}"？此操作不可恢复。`)) return;
+    
+    try {
+      const res = await fetch(`/api/simulations/${this.currentSimulation.id}`, {
+        method: 'DELETE'
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      
+      alert('删除成功');
+      this.currentSimulation = null;
+      this.currentBranchId = null;
+      this.branches = [];
+      await this.showListView();
+    } catch (e) {
+      alert('删除失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  toggleCompareMode(enabled) {
+    this.compareMode = enabled;
+    
+    const wrapperB = document.getElementById('simulation-canvas-wrapper-b');
+    const timeline = document.getElementById('simulation-timeline');
+    const compareTimeline = document.getElementById('compare-timeline');
+    const compareSection = document.getElementById('compare-section');
+    
+    if (enabled) {
+      wrapperB.style.display = 'block';
+      timeline.style.display = 'none';
+      compareTimeline.style.display = 'flex';
+      compareSection.style.display = 'block';
+      
+      this.compareBranchA = this.currentBranchId;
+      this.updateCompareSelectors();
+      
+      if (this.branches.length >= 2) {
+        this.compareBranchB = this.branches.find(b => b.id !== this.compareBranchA)?.id;
+        if (this.compareBranchB) {
+          document.getElementById('compare-branch-b').value = this.compareBranchB;
+          this.loadBranchForCompare(this.compareBranchB, 'b');
+          this.renderCompareTimelines();
+        }
+      }
+    } else {
+      wrapperB.style.display = 'none';
+      timeline.style.display = 'block';
+      compareTimeline.style.display = 'none';
+      compareSection.style.display = 'none';
+      this.compareBranchB = null;
+    }
+  }
+
+  updateCompareSelectors() {
+    const selectA = document.getElementById('compare-branch-a');
+    const selectB = document.getElementById('compare-branch-b');
+    
+    const options = this.branches.map(b => 
+      `<option value="${b.id}">${escapeHtml(b.name)}</option>`
+    ).join('');
+    
+    selectA.innerHTML = options;
+    selectB.innerHTML = options;
+    
+    if (this.compareBranchA) selectA.value = this.compareBranchA;
+    if (this.compareBranchB) selectB.value = this.compareBranchB;
+  }
+
+  async loadBranchForCompare(branchId, canvasId) {
+    try {
+      const res = await fetch(`/api/simulations/branches/${branchId}`);
+      const branch = await res.json();
+      if (branch.error) throw new Error(branch.error);
+      
+      this.drawSimulationCanvas(branch, canvasId);
+      return branch;
+    } catch (e) {
+      console.error('加载对比分支失败:', e);
+      return null;
+    }
+  }
+
+  renderCompareTimelines() {
+    const branchA = this.branches.find(b => b.id === this.compareBranchA);
+    const branchB = this.branches.find(b => b.id === this.compareBranchB);
+    
+    if (!branchA || !branchB) return;
+    
+    this.loadBranchForCompare(this.compareBranchA, 'a');
+    this.loadBranchForCompare(this.compareBranchB, 'b');
+    
+    document.getElementById('timeline-a').innerHTML = 
+      (branchA.steps || []).map((s, i) => this.renderTimelineStep(s, i)).join('');
+    
+    document.getElementById('timeline-b').innerHTML = 
+      (branchB.steps || []).map((s, i) => this.renderTimelineStep(s, i)).join('');
+  }
+
+  async runComparison() {
+    const branchAId = document.getElementById('compare-branch-a').value;
+    const branchBId = document.getElementById('compare-branch-b').value;
+    
+    if (!branchAId || !branchBId) {
+      alert('请选择两个要对比的分支');
+      return;
+    }
+    
+    if (branchAId === branchBId) {
+      alert('请选择不同的分支进行对比');
+      return;
+    }
+    
+    this.compareBranchA = branchAId;
+    this.compareBranchB = branchBId;
+    this.renderCompareTimelines();
+    
+    try {
+      const res = await fetch(`/api/simulations/branches/compare/${branchAId}/${branchBId}`);
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      
+      this.renderComparisonResults(result);
+    } catch (e) {
+      alert('对比失败: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  renderComparisonResults(result) {
+    const container = document.getElementById('compare-results');
+    
+    const totalStepsA = result.totalStepsA || 0;
+    const totalStepsB = result.totalStepsB || 0;
+    const stepDiff = totalStepsB - totalStepsA;
+    
+    const totalTimeA = result.totalDurationA || 0;
+    const totalTimeB = result.totalDurationB || 0;
+    const timeDiff = totalTimeB - totalTimeA;
+    
+    const violationsA = result.violationsA || 0;
+    const violationsB = result.violationsB || 0;
+    const violationDiff = violationsB - violationsA;
+    
+    const divergencePoint = result.divergencePoint != null ? `第 ${result.divergencePoint + 1} 步` : '无';
+    
+    container.innerHTML = `
+      <div class="compare-summary">
+        <div class="compare-summary-card">
+          <div class="compare-summary-label">步骤数差异</div>
+          <div class="compare-summary-value ${stepDiff !== 0 ? (stepDiff > 0 ? 'diff-positive' : 'diff-negative') : ''}">
+            ${totalStepsA} → ${totalStepsB} (${stepDiff >= 0 ? '+' : ''}${stepDiff})
+          </div>
+        </div>
+        <div class="compare-summary-card">
+          <div class="compare-summary-label">耗时差异</div>
+          <div class="compare-summary-value ${timeDiff !== 0 ? (timeDiff > 0 ? 'diff-negative' : 'diff-positive') : ''}">
+            ${totalTimeA}ms → ${totalTimeB}ms (${timeDiff >= 0 ? '+' : ''}${timeDiff}ms)
+          </div>
+        </div>
+        <div class="compare-summary-card">
+          <div class="compare-summary-label">违规数差异</div>
+          <div class="compare-summary-value ${violationDiff !== 0 ? 'diff-negative' : ''}">
+            ${violationsA} → ${violationsB} (${violationDiff >= 0 ? '+' : ''}${violationDiff})
+          </div>
+        </div>
+        <div class="compare-summary-card">
+          <div class="compare-summary-label">分叉点</div>
+          <div class="compare-summary-value">${escapeHtml(divergencePoint)}</div>
+        </div>
+      </div>
+      
+      <div class="compare-diff-list">
+        ${result.differences.map(diff => this.renderDiffItem(diff)).join('')}
+      </div>
+    `;
+  }
+
+  renderDiffItem(diff) {
+    const isSame = diff.type === 'same' || (!diff.difference && diff.a && diff.b && 
+      diff.a.to_state_id === diff.b.to_state_id && 
+      diff.a.event_name === diff.b.event_name);
+    
+    const diffClass = isSame ? 'same' : 'different';
+    
+    let typeLabel = diff.stepType || diff.type;
+    if (diff.a?.step_type === 'initial') typeLabel = '初始状态';
+    else if (diff.a?.step_type === 'transition') typeLabel = `事件: ${diff.a.event_name || '-'}`;
+    else if (diff.a?.step_type === 'timeout') typeLabel = '超时触发';
+    
+    let typeClass = '';
+    if (diff.difference === 'state') typeClass = '状态变化';
+    else if (diff.difference === 'event') typeClass = '事件';
+    else if (diff.difference === 'guard') typeClass = '守卫';
+    else if (diff.difference === 'compliance') typeClass = '合规';
+    else if (diff.difference === 'timeout') typeClass = '超时';
+    else if (diff.difference === 'duration') typeClass = '耗时';
+    
+    return `
+      <div class="compare-diff-item ${diffClass}">
+        <div class="compare-diff-header">
+          <span>#${diff.index + 1} - ${escapeHtml(typeLabel)}</span>
+          ${typeClass ? `<span class="compare-diff-type">${escapeHtml(typeClass)}</span>` : ''}
+        </div>
+        <div class="compare-diff-content">
+          <div class="compare-diff-side a">
+            <div class="diff-label">分支 A</div>
+            <div class="diff-value">
+              ${diff.a ? this.renderDiffSideValue(diff.a) : '<em>无此步骤</em>'}
+            </div>
+          </div>
+          <div class="compare-diff-side b">
+            <div class="diff-label">分支 B</div>
+            <div class="diff-value">
+              ${diff.b ? this.renderDiffSideValue(diff.b) : '<em>无此步骤</em>'}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  renderDiffSideValue(step) {
+    let html = '';
+    
+    if (step.to_state_id) {
+      html += `<div><strong>状态:</strong> ${escapeHtml(step.to_state_id)}</div>`;
+    }
+    
+    if (step.duration_ms != null) {
+      html += `<div><strong>耗时:</strong> ${step.duration_ms}ms</div>`;
+    }
+    
+    if (step.guard_result) {
+      const guard = JSON.parse(step.guard_result);
+      html += `<div>
+        <strong>守卫:</strong> 
+        <span class="diff-badge ${guard.passed ? 'pass' : 'fail'}">
+          ${guard.passed ? '放行' : '拦截'}
+        </span>
+        ${guard.reason ? `<div style="font-size:10px;color:#8c8c8c;">${escapeHtml(guard.reason)}</div>` : ''}
+      </div>`;
+    }
+    
+    if (step.compliance_result) {
+      const comp = JSON.parse(step.compliance_result);
+      if (comp.blocked || (comp.violations && comp.violations.length > 0)) {
+        html += `<div>
+          <strong>合规:</strong>
+          <span class="diff-badge violation">${comp.violations?.length || 0} 项违规</span>
+          ${comp.violations?.map(v => `<div class="violation-detail">${escapeHtml(v.message)}</div>`).join('')}
+        </div>`;
+      }
+    }
+    
+    return html || '-';
+  }
+
+  formatTime(isoString) {
+    if (!isoString) return '-';
+    try {
+      const date = new Date(isoString);
+      return date.toLocaleString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+    } catch (e) {
+      return isoString;
+    }
+  }
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   window.app = new WorkflowApp();
+  window.simulationLab = new SimulationLab();
 });

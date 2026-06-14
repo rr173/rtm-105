@@ -39,6 +39,19 @@ const {
   getMachinesGroupedByName,
   getMachineById
 } = require('./version-migration');
+const {
+  createSimulation,
+  listSimulations,
+  getSimulationDetail,
+  deleteSimulation,
+  sendEventToBranch,
+  simulateTimeout,
+  forkBranch,
+  refreshFromSource,
+  createBranchFromLatest,
+  getBranchDetail,
+  compareBranches
+} = require('./simulation-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -897,6 +910,124 @@ app.get('/api/machines/:machineId/compliance/violations/stats', async (req, res)
         count: topPolicyResult.cnt
       } : null
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/simulations', async (req, res) => {
+  try {
+    const { sourceType, sourceMachineId, sourceInstanceId, name } = req.body;
+    const result = await createSimulation({ sourceType, sourceMachineId, sourceInstanceId, name });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/simulations', async (req, res) => {
+  try {
+    const { sourceMachineId, sourceInstanceId } = req.query;
+    const result = await listSimulations({ sourceMachineId, sourceInstanceId });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/simulations/:id', async (req, res) => {
+  try {
+    const result = await getSimulationDetail(req.params.id);
+    if (!result) return res.status(404).json({ error: 'Simulation not found' });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/simulations/:id', async (req, res) => {
+  try {
+    const deleted = await deleteSimulation(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Simulation not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/simulations/branches/:branchId/send', async (req, res) => {
+  try {
+    const { event, payload } = req.body;
+    if (!event) return res.status(400).json({ error: 'Event name required' });
+    const result = await sendEventToBranch(req.params.branchId, { event, payload: payload || {} });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/simulations/branches/:branchId/timeout', async (req, res) => {
+  try {
+    const { simulateSeconds } = req.body;
+    const seconds = typeof simulateSeconds === 'number' ? simulateSeconds : 0;
+    const result = await simulateTimeout(req.params.branchId, { simulateSeconds: seconds });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/simulations/branches/:branchId/fork', async (req, res) => {
+  try {
+    const { stepIndex, name, targetMachineId } = req.body;
+    if (stepIndex === undefined || stepIndex === null) {
+      return res.status(400).json({ error: 'stepIndex is required' });
+    }
+    const result = await forkBranch(req.params.branchId, { stepIndex, name, targetMachineId });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/simulations/branches/:branchId/refresh', async (req, res) => {
+  try {
+    const result = await refreshFromSource(req.params.branchId);
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/simulations/branches/:branchId/new-from-latest', async (req, res) => {
+  try {
+    const { name } = req.body;
+    const result = await createBranchFromLatest(req.params.branchId, { name });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/simulations/branches/:branchId', async (req, res) => {
+  try {
+    const result = await getBranchDetail(req.params.branchId);
+    if (!result) return res.status(404).json({ error: 'Branch not found' });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/simulations/branches/compare/:branchA/:branchB', async (req, res) => {
+  try {
+    const branchA = await getBranchDetail(req.params.branchA);
+    const branchB = await getBranchDetail(req.params.branchB);
+    if (!branchA || !branchB) {
+      return res.status(404).json({ error: 'One or both branches not found' });
+    }
+    const result = compareBranches(branchA, branchB);
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

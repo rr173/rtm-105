@@ -13,6 +13,7 @@
       <button id="btn-new" class="btn">新建状态机</button>
       <button id="btn-publish" class="btn btn-primary">发布状态机</button>
       <button id="btn-open-market" class="btn">📦 模板市场</button>
+      <button id="btn-open-simulation" class="btn" style="background: #722ed1;">🔬 推演实验室</button>
     </div>
   </header>
 
@@ -211,6 +212,211 @@
           <div class="migration-actions">
             <button id="btn-close-migration-result" class="btn btn-primary">完成</button>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="simulation-modal" class="modal-overlay" style="display:none;">
+    <div class="modal" style="max-width: 1400px; width: 95vw; max-height: 95vh;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #722ed1 0%, #531dab 100%);">
+        <h2>🔬 流程推演实验室</h2>
+        <button id="btn-close-simulation" class="modal-close">&times;</button>
+      </div>
+
+      <div id="simulation-main" class="simulation-main">
+        <div id="simulation-list-view" class="simulation-view">
+          <div class="simulation-toolbar">
+            <button id="btn-create-simulation" class="btn btn-primary">+ 新建推演</button>
+            <div class="simulation-filter">
+              <input type="text" id="simulation-search" placeholder="🔍 搜索推演..." style="padding: 6px 12px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 13px;">
+            </div>
+          </div>
+          <div id="simulation-list" class="simulation-list-grid"></div>
+        </div>
+
+        <div id="simulation-create-view" class="simulation-view" style="display:none;">
+          <div class="simulation-toolbar">
+            <button id="btn-back-to-list" class="btn">&larr; 返回列表</button>
+            <h3 style="margin:0;">创建新推演</h3>
+          </div>
+          <div class="create-simulation-form">
+            <div class="form-group">
+              <label>推演名称</label>
+              <input type="text" id="simulation-name" placeholder="请输入推演名称" style="padding: 10px 12px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 14px;">
+            </div>
+            <div class="form-group">
+              <label>数据源类型</label>
+              <div class="source-type-options">
+                <label class="source-type-option">
+                  <input type="radio" name="sourceType" value="machine" checked>
+                  <span>从已发布状态机创建</span>
+                  <small>从初始状态开始推演，没有历史数据</small>
+                </label>
+                <label class="source-type-option">
+                  <input type="radio" name="sourceType" value="instance">
+                  <span>从真实运行实例创建</span>
+                  <small>复制实例当前状态和完整历史，可继续推演</small>
+                </label>
+              </div>
+            </div>
+            <div id="machine-select-section" class="form-group">
+              <label>选择状态机</label>
+              <select id="simulation-machine-select" style="padding: 10px 12px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 14px;">
+                <option value="">-- 请选择状态机 --</option>
+              </select>
+            </div>
+            <div id="instance-select-section" class="form-group" style="display:none;">
+              <label>选择运行实例</label>
+              <select id="simulation-instance-select" style="padding: 10px 12px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 14px;">
+                <option value="">-- 请先选择状态机 --</option>
+              </select>
+            </div>
+            <div class="create-simulation-actions">
+              <button id="btn-submit-create-simulation" class="btn btn-primary" style="padding: 12px 32px; font-size: 15px;">开始推演</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="simulation-detail-view" class="simulation-view" style="display:none;">
+          <div class="simulation-toolbar">
+            <button id="btn-back-to-list-from-detail" class="btn">&larr; 返回列表</button>
+            <div class="simulation-title-section">
+              <h3 id="simulation-detail-title" style="margin:0;"></h3>
+              <span id="simulation-detail-meta" class="simulation-detail-meta"></span>
+            </div>
+            <div class="simulation-actions-right">
+              <button id="btn-refresh-source" class="btn" title="从源实例同步最新状态" style="display:none;">🔄 同步源实例</button>
+              <button id="btn-new-from-latest" class="btn" style="background: #13c2c2; display:none;">🆕 基于最新状态开分支</button>
+              <button id="btn-delete-simulation" class="btn btn-danger">🗑️ 删除推演</button>
+            </div>
+          </div>
+
+          <div class="simulation-detail-layout">
+            <div class="simulation-branches-panel">
+              <div class="panel-header">
+                <h4>📂 推演分支</h4>
+                <button id="btn-add-branch" class="btn btn-sm" style="background: #52c41a;">+ 分叉</button>
+              </div>
+              <div id="simulation-branches-list" class="branches-list"></div>
+            </div>
+
+            <div class="simulation-canvas-panel">
+              <div class="panel-header">
+                <h4>🗺️ 状态机沙盘</h4>
+                <div class="compare-toggle">
+                  <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+                    <input type="checkbox" id="enable-compare">
+                    <span>并排对比模式</span>
+                  </label>
+                </div>
+              </div>
+              <div id="simulation-canvas-container" class="simulation-canvas-container">
+                <div class="simulation-canvas-wrapper">
+                  <div class="canvas-label" id="canvas-a-label">分支 A</div>
+                  <canvas id="simulation-canvas-a"></canvas>
+                </div>
+                <div id="simulation-canvas-wrapper-b" class="simulation-canvas-wrapper" style="display:none;">
+                  <div class="canvas-label">分支 B</div>
+                  <canvas id="simulation-canvas-b"></canvas>
+                </div>
+              </div>
+            </div>
+
+            <div class="simulation-timeline-panel">
+              <div class="panel-header">
+                <h4>⏱️ 时间线</h4>
+                <div class="timeline-controls">
+                  <button id="btn-play-all" class="btn btn-sm" title="自动回放">▶️ 回放</button>
+                  <button id="btn-reset" class="btn btn-sm" title="重置到初始状态">↺ 重置</button>
+                </div>
+              </div>
+              <div id="simulation-timeline" class="simulation-timeline"></div>
+              <div id="compare-timeline" class="compare-timeline" style="display:none;">
+                <div class="compare-timeline-header">
+                  <span>分支 A 时间线</span>
+                  <span>分支 B 时间线</span>
+                </div>
+                <div class="compare-timeline-content">
+                  <div id="timeline-a" class="timeline-column"></div>
+                  <div id="timeline-b" class="timeline-column"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="simulation-operation-panel">
+            <div class="panel-header">
+              <h4>🎮 操作面板</h4>
+              <span id="current-branch-indicator" class="current-branch-indicator"></span>
+            </div>
+            <div class="operation-content">
+              <div class="operation-section">
+                <h5>发送事件</h5>
+                <div class="event-inputs">
+                  <input type="text" id="sim-event-name" placeholder="事件名 (如 approve)" style="flex:1; padding: 8px 12px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 13px;">
+                  <input type="text" id="sim-event-payload" placeholder='payload JSON' style="flex:1; padding: 8px 12px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 13px;">
+                  <button id="btn-sim-send-event" class="btn btn-primary">发送</button>
+                </div>
+                <div id="available-events" class="available-events"></div>
+              </div>
+              <div class="operation-section">
+                <h5>超时模拟</h5>
+                <div class="timeout-inputs">
+                  <span>模拟继续等待</span>
+                  <input type="number" id="sim-timeout-seconds" value="60" min="1" style="width: 100px; padding: 6px 10px; border: 1px solid #d9d9d9; border-radius: 6px;">
+                  <span>秒</span>
+                  <button id="btn-sim-timeout" class="btn" style="background: #fa8c16;">模拟超时</button>
+                </div>
+                <div id="timeout-info" class="timeout-info"></div>
+              </div>
+              <div class="operation-section">
+                <h5>当前状态</h5>
+                <div id="current-state-info" class="current-state-info"></div>
+              </div>
+              <div class="operation-section" id="compare-section" style="display:none;">
+                <h5>对比分析</h5>
+                <div class="compare-selectors">
+                  <select id="compare-branch-a" class="form-control" style="flex:1;"></select>
+                  <span style="padding: 0 10px;">VS</span>
+                  <select id="compare-branch-b" class="form-control" style="flex:1;"></select>
+                  <button id="btn-run-compare" class="btn btn-primary">对比</button>
+                </div>
+                <div id="compare-results" class="compare-results"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="fork-modal" class="modal-overlay" style="display:none; z-index: 10000;">
+    <div class="modal" style="max-width: 500px;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #52c41a 0%, #389e0d 100%);">
+        <h2>🌿 创建分叉分支</h2>
+        <button id="btn-close-fork" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>分支名称</label>
+          <input type="text" id="fork-branch-name" class="form-control" placeholder="请输入分支名称">
+        </div>
+        <div class="form-group">
+          <label>从哪一步分叉</label>
+          <select id="fork-step-select" class="form-control"></select>
+          <small style="color:#8c8c8c; margin-top:4px; display:block;">新分支将从该步骤之后的状态开始</small>
+        </div>
+        <div class="form-group">
+          <label>使用状态机版本（可选）</label>
+          <select id="fork-machine-select" class="form-control">
+            <option value="">-- 使用当前版本 --</option>
+          </select>
+          <small style="color:#8c8c8c; margin-top:4px; display:block;">可选择不同版本的状态机进行对比推演</small>
+        </div>
+        <div class="migration-actions">
+          <button id="btn-cancel-fork" class="btn">取消</button>
+          <button id="btn-confirm-fork" class="btn btn-primary">创建分叉</button>
         </div>
       </div>
     </div>
