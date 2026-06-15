@@ -89,11 +89,30 @@ function detectUnreachableStates(states, transitions, initialState, stateMap, is
   }
 }
 
+function getStateTimeoutTransition(state, transitions) {
+  if (!state || !state.timeout || !state.timeout.event) {
+    return null;
+  }
+  const timeoutEvent = state.timeout.event;
+  return transitions.find(t => t.sourceStateId === state.id && t.event === timeoutEvent) || null;
+}
+
+function getOutgoingTransitions(state, transitions) {
+  const outgoing = transitions.filter(t => t.sourceStateId === state.id);
+  return outgoing;
+}
+
+function hasOutgoingTransitions(state, transitions) {
+  return transitions.some(t => t.sourceStateId === state.id);
+}
+
 function detectDeadEndStates(states, transitions, stateMap, issues) {
   for (const s of states) {
     if (s.isFinal) continue;
 
-    const outgoing = transitions.filter(t => t.sourceStateId === s.id);
+    const outgoing = getOutgoingTransitions(s, transitions);
+    const hasTimeout = !!s.timeout && !!s.timeout.event;
+
     if (outgoing.length === 0) {
       issues.push({
         type: ISSUE_TYPES.DEAD_END_STATE,
@@ -101,11 +120,29 @@ function detectDeadEndStates(states, transitions, stateMap, issues) {
         message: `状态 "${s.name}" 是死端：非终态但没有任何出向转换，实例一旦进入就无法继续流转`,
         details: {
           stateId: s.id,
-          stateName: s.name
+          stateName: s.name,
+          hasTimeoutConfig: hasTimeout
         }
       });
     }
   }
+}
+
+function stateHasExitToOutside(stateId, scc, transitions, stateMap) {
+  const outgoing = transitions.filter(t => t.sourceStateId === stateId);
+  const hasExternalTransition = outgoing.some(t => !scc.includes(t.targetStateId));
+  if (hasExternalTransition) return true;
+
+  const state = stateMap.get(stateId);
+  if (state && state.timeout && state.timeout.event) {
+    const timeoutTransitions = transitions.filter(
+      t => t.sourceStateId === stateId && t.event === state.timeout.event
+    );
+    const timeoutHasExit = timeoutTransitions.some(t => !scc.includes(t.targetStateId));
+    if (timeoutHasExit) return true;
+  }
+
+  return false;
 }
 
 function detectNoExitLoops(states, transitions, stateMap, issues) {
@@ -117,20 +154,23 @@ function detectNoExitLoops(states, transitions, stateMap, issues) {
   for (const scc of sccs) {
     if (scc.length < 1) continue;
 
-    const hasExit = scc.some(stateId => {
-      const outgoing = transitions.filter(t => t.sourceStateId === stateId);
-      return outgoing.some(t => !scc.includes(t.targetStateId));
-    });
+    const hasExit = scc.some(stateId => 
+      stateHasExitToOutside(stateId, scc, transitions, stateMap)
+    );
 
     if (!hasExit && (scc.length > 1 || (scc.length === 1 && hasSelfLoop(scc[0], transitions)))) {
       const loopStates = scc.map(id => {
         const s = stateMap.get(id);
-        return { stateId: id, stateName: s ? s.name : id };
+        return { 
+          stateId: id, 
+          stateName: s ? s.name : id,
+          hasTimeout: !!(s && s.timeout && s.timeout.event)
+        };
       });
       issues.push({
         type: ISSUE_TYPES.NO_EXIT_LOOP,
         severity: SEVERITY.WARNING,
-        message: `存在无出路循环：${loopStates.map(s => `"${s.stateName}"`).join(' ↔ ')} 之间互相可达，但没有任何转换能跳出该循环`,
+        message: `存在无出路循环：${loopStates.map(s => `"${s.stateName}"`).join(' ↔ ')} 之间互相可达，但没有任何转换（包括超时事件）能跳出该循环`,
         details: {
           states: loopStates
         }

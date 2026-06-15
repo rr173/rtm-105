@@ -212,6 +212,13 @@ app.post('/api/machines', async (req, res) => {
     const definition = { states, transitions };
     const analysisResult = analyzeMachineDefinition(definition);
 
+    if (!analysisResult.pass) {
+      return res.status(422).json({
+        error: 'Static analysis failed with blocking issues. Publish blocked.',
+        analysisResult
+      });
+    }
+
     const existing = await get('SELECT MAX(version) as v FROM machines WHERE name = ?', [name]);
     const version = existing && existing.v ? existing.v + 1 : 1;
 
@@ -232,14 +239,6 @@ app.post('/api/machines', async (req, res) => {
       triggeredBy: 'publish',
       definitionSnapshot: definition
     });
-
-    if (!analysisResult.pass) {
-      return res.status(422).json({
-        error: 'Static analysis failed with blocking issues. Machine was created but cannot be used until issues are resolved.',
-        analysisReport: report,
-        machine
-      });
-    }
 
     res.json({ ...machine, latestAnalysisReport: report });
   } catch (e) {
