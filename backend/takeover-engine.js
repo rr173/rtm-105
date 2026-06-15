@@ -40,7 +40,8 @@ const ACTION_TYPES = Object.freeze({
 const QUEUE_STATUS = Object.freeze({
   PENDING: 'pending',
   PROCESSED: 'processed',
-  CANCELLED: 'cancelled'
+  CANCELLED: 'cancelled',
+  FAILED: 'failed'
 });
 
 function initTakeoverDB() {
@@ -104,6 +105,7 @@ function initTakeoverDB() {
           queued_by TEXT,
           status TEXT NOT NULL DEFAULT 'pending',
           processed_at TEXT,
+          error_message TEXT,
           order_index INTEGER NOT NULL,
           FOREIGN KEY (instance_id) REFERENCES instances(id)
         );
@@ -267,6 +269,10 @@ async function processQueuedEvents(instanceId, machineDefinition) {
       );
       results.push({ ...event, success: true, result });
     } catch (e) {
+      await run(
+        'UPDATE instance_event_queue SET status = ?, processed_at = ?, error_message = ? WHERE id = ?',
+        [QUEUE_STATUS.FAILED, new Date().toISOString(), e.message, event.id]
+      );
       results.push({ ...event, success: false, error: e.message });
     }
   }

@@ -1782,7 +1782,7 @@ class WorkflowApp {
       targetSelect.innerHTML = '<option value="">-- 请选择目标版本 --</option>' +
         targetVersions.map(m => `
           <option value="${escapeHtml(m.id)}">
-            v${m.version} ${m.version > sourceMachine.version ? '(更新)' : '(更旧')} · ${new Date(m.createdAt).toLocaleString()}
+            v${m.version} ${m.version > sourceMachine.version ? '(更新)' : '(更旧)'} · ${new Date(m.createdAt).toLocaleString()}
           </option>
         `).join('');
 

@@ -1219,8 +1219,10 @@ app.get('/api/takeover/sessions/:sessionId', async (req, res) => {
     );
 
     const currentState = machine?.definition.states.find(s => s.id === instance.current_state_id);
-    const availableEvents = currentState?.transitions 
-      ? [...new Set(currentState.transitions.map(t => t.event))]
+    const availableEvents = currentState && machine?.definition.transitions
+      ? [...new Set(machine.definition.transitions
+          .filter(t => t.sourceStateId === instance.current_state_id)
+          .map(t => t.event))]
       : [];
 
     const reachableStates = machine?.definition.states.filter(s => !s.isInitial) || [];
