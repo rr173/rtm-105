@@ -74,6 +74,16 @@ class WorkflowApp {
     this.migrationSelectedInstances = new Set();
     this.migrationCheckResult = null;
     this.latestVersions = new Map();
+
+    this.takeoverSessions = [];
+    this.currentTakeoverSession = null;
+    this.takeoverSessionDetail = null;
+    this.takeoverPendingAction = null;
+    this.takeoverOperatorName = localStorage.getItem('takeoverOperatorName') || '';
+    this.takeoverOperatorId = 'user_' + Math.random().toString(36).slice(2, 10);
+    this.takeoverRefreshTimer = null;
+    this.takeoverCurrentTab = 'inject';
+    this.takeoverPreviewResult = null;
     
     this.init();
   }
@@ -133,6 +143,7 @@ class WorkflowApp {
     document.getElementById('btn-clear-violations').addEventListener('click', () => this.clearViolations());
     this.bindTemplateMarketEvents();
     this.bindMigrationEvents();
+    this.bindTakeoverEvents();
   }
 
   bindMigrationEvents() {
@@ -852,7 +863,8 @@ class WorkflowApp {
       const stateName = state ? state.name : inst.currentStateId;
       const cls = 'instance-chip' + 
         (inst.id === this.selectedInstance ? ' active' : '') +
-        (inst.isFinal ? ' final' : '');
+        (inst.isFinal ? ' final' : '') +
+        (inst.isFrozen ? ' frozen' : '');
       
       let versionBadge = '';
       if (inst.machineVersion !== undefined && latestVersion !== null) {
@@ -862,9 +874,15 @@ class WorkflowApp {
           versionBadge = `<span class="instance-version-badge latest">v${inst.machineVersion}</span>`;
         }
       }
+
+      let takeoverBadge = '';
+      if (inst.isFrozen) {
+        const operatorName = inst.activeTakeover ? inst.activeTakeover.operatorName : '冻结';
+        takeoverBadge = `<span class="badge badge-danger" style="margin-left:4px;">❄️ ${operatorName}</span>`;
+      }
       
       return `<div class="${cls}" data-id="${inst.id}">
-        ${inst.id.slice(0, 8)}… [${stateName}]${versionBadge}
+        ${inst.id.slice(0, 8)}… [${stateName}]${versionBadge}${takeoverBadge}
       </div>`;
     }).join('');
     container.querySelectorAll('.instance-chip').forEach(el => {
@@ -955,12 +973,77 @@ class WorkflowApp {
       historyHtml += '</div></div>';
     }
     
+    let freezeInfoHtml = '';
+    if (inst.freezeInfo && inst.freezeInfo.isFrozen) {
+      freezeInfoHtml = `
+        <div style="margin-top:10px;padding:12px;background:#fff1f0;border:1px solid #ffa39e;border-radius:6px;">
+          <div style="color:#cf1322;font-weight:600;margin-bottom:6px;">❄️ 实例已冻结</div>
+          <div style="font-size:12px;color:#595959;">
+            冻结人: ${escapeHtml(inst.freezeInfo.frozenBy)}<br>
+            冻结时间: ${new Date(inst.freezeInfo.frozenAt).toLocaleString()}
+            ${inst.freezeInfo.reason ? `<br>原因: ${escapeHtml(inst.freezeInfo.reason)}` : ''}
+          </div>
+          ${inst.activeTakeover ? `
+            <div style="margin-top:8px;font-size:12px;color:#d46b08;">
+              👤 当前接管人: <strong>${escapeHtml(inst.activeTakeover.operatorName)}</strong>
+            </div>
+          ` : ''}
+          <div style="margin-top:8px;">
+            <button class="btn btn-sm btn-primary" onclick="app.openTakeoverForInstance('${inst.id}')">🚨 进入接管工作台</button>
+          </div>
+        </div>
+      `;
+    } else {
+      freezeInfoHtml = `
+        <div style="margin-top:10px;">
+          <button class="btn btn-sm" style="background:#d4380d;" onclick="app.freezeInstance('${inst.id}')">❄️ 冻结并接管</button>
+        </div>
+      `;
+    }
+
+    let pendingEventsHtml = '';
+    if (inst.pendingEvents && inst.pendingEvents.length > 0) {
+      pendingEventsHtml = `
+        <div style="margin-top:10px;">
+          <strong>排队事件 (${inst.pendingEvents.length}):</strong>
+          <div style="max-height:100px;overflow-y:auto;">
+            ${inst.pendingEvents.map(e => `
+              <div style="font-size:11px;padding:4px 8px;background:#fffbe6;border-left:2px solid #faad14;margin-top:4px;border-radius:2px;">
+                <strong>${escapeHtml(e.eventName)}</strong> - ${new Date(e.receivedAt).toLocaleTimeString()}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    let violationsHtml = '';
+    if (inst.recentViolations && inst.recentViolations.length > 0) {
+      violationsHtml = `
+        <div style="margin-top:10px;">
+          <strong>最近违规 (${inst.recentViolations.length}):</strong>
+          <div style="max-height:120px;overflow-y:auto;">
+            ${inst.recentViolations.slice(0, 5).map(v => `
+              <div style="font-size:11px;padding:6px 8px;background:#fff1f0;border-left:2px solid #ff4d4f;margin-top:4px;border-radius:2px;">
+                <div style="color:#cf1322;font-weight:600;">${escapeHtml(v.policyName || '违规')}</div>
+                <div style="color:#595959;">${escapeHtml(v.reason)}</div>
+                <div style="color:#8c8c8c;font-size:10px;">${new Date(v.attemptedAt).toLocaleString()}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
     detail.innerHTML = `
       <div><strong>实例ID:</strong> ${inst.id}</div>
       <div><strong>当前状态:</strong> <span style="color:#1890ff;font-weight:600;">${stateName}</span>${inst.isFinal ? ' <span class="badge badge-active">终态</span>' : ''}</div>
       ${versionInfo}
       <div><strong>创建时间:</strong> ${new Date(inst.createdAt).toLocaleString()}</div>
       <div><strong>上下文:</strong> <code style="background:#f5f5f5;padding:2px 6px;border-radius:3px;">${JSON.stringify(inst.context)}</code></div>
+      ${freezeInfoHtml}
+      ${pendingEventsHtml}
+      ${violationsHtml}
       ${migrationHistoryHtml}
       ${historyHtml}
     `;
@@ -1286,6 +1369,43 @@ class WorkflowApp {
         this.loadInstances();
       }
       this.loadMachines();
+    } else if (msg.type === 'takeover_started') {
+      toast(`🚨 实例 ${msg.instanceId.slice(0, 8)}… 已被 ${msg.operatorName} 接管`, 'warning');
+      this.updateInstanceFrozenStatus(msg.instanceId, true, msg.operatorName);
+      if (this.currentTakeoverSession || document.getElementById('takeover-modal').style.display === 'flex') {
+        this.loadTakeoverDashboard();
+      }
+    } else if (msg.type === 'takeover_ended') {
+      toast(`✅ 实例 ${msg.instanceId.slice(0, 8)}… 接管已结束`, 'success');
+      this.updateInstanceFrozenStatus(msg.instanceId, false);
+      if (this.currentTakeoverSession && this.currentTakeoverSession.instanceId === msg.instanceId) {
+        this.currentTakeoverSession = null;
+        this.showTakeoverDashboard();
+      }
+      if (document.getElementById('takeover-modal').style.display === 'flex') {
+        this.loadTakeoverDashboard();
+      }
+    } else if (msg.type === 'takeover_action') {
+      if (this.currentTakeoverSession && this.currentTakeoverSession.id === msg.sessionId) {
+        this.loadTakeoverSessionDetail(msg.sessionId);
+      }
+      if (this.selectedInstance === msg.instanceId) {
+        this.selectInstance(msg.instanceId);
+      }
+      if (document.getElementById('takeover-modal').style.display === 'flex') {
+        this.loadTakeoverDashboard();
+      }
+    } else if (msg.type === 'instance_frozen') {
+      toast(`❄️ 实例已被 ${msg.frozenByName} 冻结`, 'warning');
+      this.updateInstanceFrozenStatus(msg.instanceId, true, msg.frozenByName);
+    } else if (msg.type === 'instance_unfrozen') {
+      toast(`☀️ 实例已被 ${msg.unfrozenByName} 解冻`, 'success');
+      this.updateInstanceFrozenStatus(msg.instanceId, false);
+    } else if (msg.type === 'event_queued') {
+      toast(`📥 事件 "${msg.event}" 已排队等待`, 'info');
+      if (this.currentTakeoverSession && this.currentTakeoverSession.instanceId === msg.instanceId) {
+        this.loadTakeoverSessionDetail(this.currentTakeoverSession.id);
+      }
     }
   }
   
@@ -3279,6 +3399,802 @@ class SimulationLab {
     }
     
     return html || '-';
+  }
+
+  updateInstanceFrozenStatus(instanceId, isFrozen, operatorName) {
+    const inst = this.instances.find(i => i.id === instanceId);
+    if (inst) {
+      inst.isFrozen = isFrozen;
+      if (isFrozen && operatorName) {
+        inst.freezeInfo = inst.freezeInfo || {};
+        inst.freezeInfo.isFrozen = true;
+        inst.freezeInfo.frozenBy = operatorName;
+        inst.freezeInfo.frozenAt = new Date().toISOString();
+      } else if (!isFrozen) {
+        inst.freezeInfo = null;
+        inst.activeTakeover = null;
+      }
+      this.countInstanceState();
+      this.renderInstanceList();
+      if (this.selectedInstance === instanceId) {
+        this.selectInstance(instanceId);
+      }
+    }
+  }
+
+  bindTakeoverEvents() {
+    const modal = document.getElementById('takeover-modal');
+    const openBtn = document.getElementById('btn-open-takeover');
+    const closeBtn = document.getElementById('takeover-close-btn');
+
+    openBtn.addEventListener('click', () => {
+      if (!this.takeoverOperatorName) {
+        const name = prompt('请输入您的操作人姓名:', '');
+        if (!name) return;
+        this.takeoverOperatorName = name.trim();
+        localStorage.setItem('takeoverOperatorName', this.takeoverOperatorName);
+      }
+      this.openTakeoverWorkbench();
+    });
+
+    closeBtn.addEventListener('click', () => {
+      this.closeTakeoverWorkbench();
+    });
+
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) {
+        this.closeTakeoverWorkbench();
+      }
+    });
+
+    document.getElementById('takeover-filter-status').addEventListener('change', () => {
+      this.renderTakeoverDashboard();
+    });
+
+    document.getElementById('takeover-filter-machine').addEventListener('change', () => {
+      this.renderTakeoverDashboard();
+    });
+
+    document.getElementById('takeover-btn-back').addEventListener('click', () => {
+      this.showTakeoverDashboard();
+    });
+
+    document.querySelectorAll('.takeover-action-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.takeover-action-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        this.takeoverCurrentTab = tab.dataset.tab;
+        this.renderTakeoverActionPanel();
+      });
+    });
+
+    document.getElementById('takeover-btn-preview').addEventListener('click', () => {
+      this.previewTakeoverAction();
+    });
+
+    document.getElementById('takeover-btn-execute').addEventListener('click', () => {
+      this.executeTakeoverAction();
+    });
+
+    document.getElementById('takeover-btn-resume').addEventListener('click', () => {
+      this.resumeInstance();
+    });
+
+    document.getElementById('takeover-btn-unfreeze').addEventListener('click', () => {
+      this.unfreezeInstance();
+    });
+  }
+
+  openTakeoverWorkbench() {
+    document.getElementById('takeover-modal').style.display = 'flex';
+    this.showTakeoverDashboard();
+    this.startTakeoverRefreshTimer();
+  }
+
+  closeTakeoverWorkbench() {
+    document.getElementById('takeover-modal').style.display = 'none';
+    this.stopTakeoverRefreshTimer();
+    this.currentTakeoverSession = null;
+    this.takeoverSessionDetail = null;
+  }
+
+  openTakeoverForInstance(instanceId) {
+    if (!this.takeoverOperatorName) {
+      const name = prompt('请输入您的操作人姓名:', '');
+      if (!name) return;
+      this.takeoverOperatorName = name.trim();
+      localStorage.setItem('takeoverOperatorName', this.takeoverOperatorName);
+    }
+
+    const inst = this.instances.find(i => i.id === instanceId);
+    if (inst && inst.activeTakeover && inst.activeTakeover.operatorId !== this.takeoverOperatorId) {
+      toast(`⚠️ 该实例已被 ${inst.activeTakeover.operatorName} 接管`, 'warning');
+      document.getElementById('takeover-modal').style.display = 'flex';
+      this.showTakeoverDashboard();
+      this.startTakeoverRefreshTimer();
+      return;
+    }
+
+    fetch(`/api/takeover/instances/${instanceId}/takeover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operatorId: this.takeoverOperatorId,
+        operatorName: this.takeoverOperatorName,
+        reason: '主动接管实例'
+      })
+    }).then(r => r.json()).then(result => {
+      if (result.success) {
+        document.getElementById('takeover-modal').style.display = 'flex';
+        this.startTakeoverRefreshTimer();
+        this.currentTakeoverSession = result.session;
+        this.loadTakeoverSessionDetail(result.session.id);
+      } else {
+        toast(result.error || '接管失败', 'error');
+      }
+    }).catch(e => {
+      toast('接管失败: ' + e.message, 'error');
+    });
+  }
+
+  freezeInstance(instanceId) {
+    if (!this.takeoverOperatorName) {
+      const name = prompt('请输入您的操作人姓名:', '');
+      if (!name) return;
+      this.takeoverOperatorName = name.trim();
+      localStorage.setItem('takeoverOperatorName', this.takeoverOperatorName);
+    }
+
+    const reason = prompt('请输入冻结原因:', '实例需要人工介入');
+    if (!reason) return;
+
+    fetch(`/api/takeover/instances/${instanceId}/freeze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operatorId: this.takeoverOperatorId,
+        operatorName: this.takeoverOperatorName,
+        reason: reason
+      })
+    }).then(r => r.json()).then(result => {
+      if (result.success) {
+        toast('❄️ 实例已冻结，正在打开接管工作台...', 'success');
+        this.openTakeoverForInstance(instanceId);
+      } else {
+        toast(result.error || '冻结失败', 'error');
+      }
+    }).catch(e => {
+      toast('冻结失败: ' + e.message, 'error');
+    });
+  }
+
+  startTakeoverRefreshTimer() {
+    this.stopTakeoverRefreshTimer();
+    this.takeoverRefreshTimer = setInterval(() => {
+      if (this.currentTakeoverSession) {
+        this.loadTakeoverSessionDetail(this.currentTakeoverSession.id);
+      } else {
+        this.loadTakeoverDashboard();
+      }
+    }, 5000);
+  }
+
+  stopTakeoverRefreshTimer() {
+    if (this.takeoverRefreshTimer) {
+      clearInterval(this.takeoverRefreshTimer);
+      this.takeoverRefreshTimer = null;
+    }
+  }
+
+  showTakeoverDashboard() {
+    this.currentTakeoverSession = null;
+    this.takeoverSessionDetail = null;
+    document.getElementById('takeover-dashboard-view').style.display = 'block';
+    document.getElementById('takeover-session-view').style.display = 'none';
+    this.loadTakeoverDashboard();
+  }
+
+  loadTakeoverDashboard() {
+    fetch('/api/takeover/dashboard').then(r => r.json()).then(result => {
+      if (result.success) {
+        this.takeoverSessions = result.sessions || [];
+        this.renderTakeoverDashboard();
+        this.renderTakeoverMachineFilter();
+      }
+    });
+  }
+
+  renderTakeoverMachineFilter() {
+    const filter = document.getElementById('takeover-filter-machine');
+    const currentValue = filter.value;
+    
+    const options = ['<option value="">全部状态机</option>'];
+    this.machines.forEach(m => {
+      options.push(`<option value="${m.id}">${escapeHtml(m.name)}</option>`);
+    });
+    filter.innerHTML = options.join('');
+    filter.value = currentValue || '';
+  }
+
+  renderTakeoverDashboard() {
+    const statusFilter = document.getElementById('takeover-filter-status').value;
+    const machineFilter = document.getElementById('takeover-filter-machine').value;
+
+    let sessions = [...this.takeoverSessions];
+    
+    if (statusFilter) {
+      sessions = sessions.filter(s => s.status === statusFilter);
+    }
+    if (machineFilter) {
+      sessions = sessions.filter(s => s.instance.machineId === machineFilter);
+    }
+
+    const frozenCount = this.takeoverSessions.filter(s => s.status === 'active').length;
+    const todayCount = this.takeoverSessions.filter(s => {
+      const today = new Date().toDateString();
+      return new Date(s.createdAt).toDateString() === today;
+    }).length;
+
+    document.getElementById('takeover-stat-frozen').textContent = frozenCount;
+    document.getElementById('takeover-stat-today').textContent = todayCount;
+    document.getElementById('takeover-stat-total').textContent = this.takeoverSessions.length;
+
+    const container = document.getElementById('takeover-instance-list');
+    if (sessions.length === 0) {
+      container.innerHTML = '<div style="padding:40px;text-align:center;color:#8c8c8c;">暂无需要接管的实例</div>';
+      return;
+    }
+
+    container.innerHTML = sessions.map(session => {
+      const inst = session.instance;
+      const isActive = session.status === 'active';
+      const machine = this.machines.find(m => m.id === inst.machineId);
+      const machineName = machine ? machine.name : inst.machineId;
+      const canJoin = isActive && session.operatorId !== this.takeoverOperatorId;
+
+      return `
+        <div class="takeover-status-card">
+          <div class="takeover-card-header">
+            <span class="status-badge ${isActive ? 'danger' : 'success'}">
+              ${isActive ? '❄️ 冻结中' : '✅ 已恢复'}
+            </span>
+            <span class="takeover-time">${this.formatTime(session.createdAt)}</span>
+          </div>
+          <div class="takeover-card-title">
+            ${machineName} - ${inst.id.slice(0, 12)}
+          </div>
+          <div class="takeover-card-info">
+            <div>当前状态: <span class="highlight">${escapeHtml(inst.currentStateName || inst.currentStateId)}</span></div>
+            <div>冻结原因: ${escapeHtml(session.reason || '未指定')}</div>
+            <div>接管人: <strong>${escapeHtml(session.operatorName)}</strong></div>
+            ${inst.pendingEventCount > 0 ? `<div style="color:#d46b08;">📥 排队事件: ${inst.pendingEventCount}</div>` : ''}
+            ${inst.recentViolationCount > 0 ? `<div style="color:#cf1322;">⚠️ 近期违规: ${inst.recentViolationCount}</div>` : ''}
+          </div>
+          <div class="takeover-card-actions">
+            <button class="btn btn-sm btn-primary" onclick="app.enterTakeoverSession('${session.id}')">
+              ${isActive ? '查看详情' : '查看历史'}
+            </button>
+            ${canJoin ? `
+              <button class="btn btn-sm" style="background:#d46b08;" onclick="app.joinTakeoverSession('${session.id}')">
+                加入接管
+              </button>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  enterTakeoverSession(sessionId) {
+    const session = this.takeoverSessions.find(s => s.id === sessionId);
+    if (session && session.status === 'active' && session.operatorId !== this.takeoverOperatorId) {
+      if (!confirm(`该实例正由 ${session.operatorName} 接管，您要以观察者身份加入吗？`)) {
+        return;
+      }
+    }
+    this.currentTakeoverSession = session;
+    this.loadTakeoverSessionDetail(sessionId);
+  }
+
+  joinTakeoverSession(sessionId) {
+    if (!confirm('确认要加入接管？这会同时通知当前接管人。')) return;
+
+    fetch(`/api/takeover/sessions/${sessionId}/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operatorId: this.takeoverOperatorId,
+        operatorName: this.takeoverOperatorName
+      })
+    }).then(r => r.json()).then(result => {
+      if (result.success) {
+        toast('已加入接管会话', 'success');
+        this.currentTakeoverSession = result.session;
+        this.loadTakeoverSessionDetail(sessionId);
+      } else {
+        toast(result.error || '加入失败', 'error');
+      }
+    });
+  }
+
+  loadTakeoverSessionDetail(sessionId) {
+    fetch(`/api/takeover/sessions/${sessionId}`).then(r => r.json()).then(result => {
+      if (result.success) {
+        this.takeoverSessionDetail = result.detail;
+        this.renderTakeoverSession();
+      }
+    });
+  }
+
+  renderTakeoverSession() {
+    const detail = this.takeoverSessionDetail;
+    if (!detail) return;
+
+    const session = detail.session;
+    const instance = detail.instance;
+    const isMySession = session.operatorId === this.takeoverOperatorId;
+    const machine = this.machines.find(m => m.id === instance.machineId);
+    const machineName = machine ? machine.name : instance.machineId;
+
+    document.getElementById('takeover-dashboard-view').style.display = 'none';
+    document.getElementById('takeover-session-view').style.display = 'block';
+
+    document.getElementById('takeover-session-header').innerHTML = `
+      <div>
+        <span class="status-badge ${session.status === 'active' ? 'danger' : 'success'}">
+          ${session.status === 'active' ? '❄️ 接管中' : '✅ 已结束'}
+        </span>
+        <span style="margin-left:8px;font-weight:600;">${machineName}</span>
+        <span style="margin-left:8px;font-family:monospace;color:#8c8c8c;">${instance.id}</span>
+      </div>
+      <div style="font-size:12px;color:#595959;">
+        接管人: ${escapeHtml(session.operatorName)} · 开始于 ${this.formatTime(session.createdAt)}
+      </div>
+    `;
+
+    this.renderTakeoverInstanceState();
+    this.renderTakeoverPendingEvents();
+    this.renderTakeoverHistory();
+    this.renderTakeoverActionLog();
+    this.renderTakeoverActionPanel();
+
+    document.getElementById('takeover-btn-execute').disabled = !isMySession || session.status !== 'active';
+    document.getElementById('takeover-btn-resume').disabled = !isMySession || session.status !== 'active';
+    document.getElementById('takeover-btn-unfreeze').disabled = !isMySession || session.status !== 'active';
+  }
+
+  renderTakeoverInstanceState() {
+    const detail = this.takeoverSessionDetail;
+    const instance = detail.instance;
+    const context = instance.context ? JSON.parse(instance.context) : {};
+    const contextStr = JSON.stringify(context, null, 2);
+
+    document.getElementById('takeover-current-state').innerHTML = `
+      <div style="font-size:18px;font-weight:600;color:#1890ff;">${escapeHtml(instance.currentStateName || instance.currentStateId)}</div>
+      <div style="font-size:11px;color:#8c8c8c;margin-top:4px;">状态ID: ${instance.currentStateId}</div>
+      <div style="margin-top:8px;">
+        <strong>上下文:</strong>
+        <pre style="background:#f5f5f5;padding:8px;border-radius:4px;overflow:auto;max-height:120px;margin-top:4px;font-size:11px;">${escapeHtml(contextStr)}</pre>
+      </div>
+      ${instance.isFinal ? '<div style="margin-top:8px;color:#52c41a;font-weight:600;">🏁 已到达终态</div>' : ''}
+    `;
+
+    if (detail.stateDiagram) {
+      this.drawTakeoverStateDiagram(detail.stateDiagram);
+    }
+  }
+
+  drawTakeoverStateDiagram(diagram) {
+    const canvas = document.getElementById('takeover-state-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    const width = canvas.width;
+    const height = canvas.height;
+    const padding = 40;
+    
+    ctx.clearRect(0, 0, width, height);
+    
+    const statePositions = new Map();
+    const cols = Math.ceil(Math.sqrt(diagram.states.length));
+    const rows = Math.ceil(diagram.states.length / cols);
+    const cellW = (width - padding * 2) / cols;
+    const cellH = (height - padding * 2) / rows;
+    const stateRadius = Math.min(cellW, cellH) * 0.35;
+    
+    diagram.states.forEach((state, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = padding + col * cellW + cellW / 2;
+      const y = padding + row * cellH + cellH / 2;
+      statePositions.set(state.id, { x, y });
+    });
+    
+    diagram.transitions.forEach(trans => {
+      const from = statePositions.get(trans.from);
+      const to = statePositions.get(trans.to);
+      if (!from || !to) return;
+      
+      const angle = Math.atan2(to.y - from.y, to.x - from.x);
+      const startX = from.x + stateRadius * Math.cos(angle);
+      const startY = from.y + stateRadius * Math.sin(angle);
+      const endX = to.x - stateRadius * Math.cos(angle);
+      const endY = to.y - stateRadius * Math.sin(angle);
+      
+      ctx.strokeStyle = '#bfbfbf';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+      
+      const headLen = 8;
+      ctx.fillStyle = '#bfbfbf';
+      ctx.beginPath();
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - headLen * Math.cos(angle - Math.PI/6), endY - headLen * Math.sin(angle - Math.PI/6));
+      ctx.lineTo(endX - headLen * Math.cos(angle + Math.PI/6), endY - headLen * Math.sin(angle + Math.PI/6));
+      ctx.closePath();
+      ctx.fill();
+      
+      const midX = (startX + endX) / 2;
+      const midY = (startY + endY) / 2;
+      ctx.font = '10px sans-serif';
+      ctx.fillStyle = '#595959';
+      ctx.textAlign = 'center';
+      ctx.fillText(trans.event, midX, midY - 5);
+    });
+    
+    statePositions.forEach((pos, stateId) => {
+      const state = diagram.states.find(s => s.id === stateId);
+      const isCurrent = stateId === diagram.currentStateId;
+      
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, stateRadius, 0, Math.PI * 2);
+      ctx.fillStyle = isCurrent ? '#1890ff' : '#fff';
+      ctx.fill();
+      ctx.strokeStyle = isCurrent ? '#096dd9' : '#d9d9d9';
+      ctx.lineWidth = isCurrent ? 3 : 2;
+      ctx.stroke();
+      
+      ctx.fillStyle = isCurrent ? '#fff' : '#262626';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(state.name.slice(0, 8), pos.x, pos.y);
+    });
+  }
+
+  renderTakeoverPendingEvents() {
+    const detail = this.takeoverSessionDetail;
+    const events = detail.pendingEvents || [];
+    const container = document.getElementById('takeover-event-queue');
+
+    if (events.length === 0) {
+      container.innerHTML = '<div style="padding:20px;text-align:center;color:#8c8c8c;">暂无排队事件</div>';
+      return;
+    }
+
+    container.innerHTML = events.map((e, idx) => `
+      <div class="event-queue-item">
+        <div class="event-queue-order">#${idx + 1}</div>
+        <div class="event-queue-content">
+          <div class="event-queue-header">
+            <span class="event-queue-name">${escapeHtml(e.eventName)}</span>
+            <span class="event-queue-time">${this.formatTime(e.receivedAt)}</span>
+          </div>
+          <pre class="event-queue-payload">${escapeHtml(JSON.stringify(e.payload, null, 2))}</pre>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  renderTakeoverHistory() {
+    const detail = this.takeoverSessionDetail;
+    const history = detail.flowHistory || [];
+    const container = document.getElementById('takeover-history');
+
+    if (history.length === 0) {
+      container.innerHTML = '<div style="padding:20px;text-align:center;color:#8c8c8c;">暂无流转历史</div>';
+      return;
+    }
+
+    container.innerHTML = history.map((step, idx) => `
+      <div class="timeline-item ${idx === history.length - 1 ? 'active' : ''}">
+        <div class="timeline-dot"></div>
+        <div class="timeline-content">
+          <div class="timeline-header">
+            <span class="timeline-state">${escapeHtml(step.toStateName || step.toStateId)}</span>
+            <span class="timeline-time">${this.formatTime(step.createdAt)}</span>
+          </div>
+          <div class="timeline-event">
+            ${step.eventName ? `事件: <strong>${escapeHtml(step.eventName)}</strong>` : '初始状态'}
+          </div>
+          ${step.guardResult ? `
+            <div class="timeline-detail">
+              守卫: <span class="${step.guardResult.passed ? 'guard-pass' : 'guard-fail'}">
+                ${step.guardResult.passed ? '✅ 通过' : '❌ 拦截'}
+              </span>
+            </div>
+          ` : ''}
+          ${step.complianceResult && step.complianceResult.blocked ? `
+            <div class="timeline-detail violation">
+              ⚠️ 合规拦截: ${step.complianceResult.violations?.length || 0} 项违规
+            </div>
+          ` : ''}
+          ${step.isTimeout ? '<div class="timeline-detail timeout">⏰ 超时触发</div>' : ''}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  renderTakeoverActionLog() {
+    const detail = this.takeoverSessionDetail;
+    const actions = detail.actionLogs || [];
+    const container = document.getElementById('takeover-action-log');
+
+    if (actions.length === 0) {
+      container.innerHTML = '<div style="padding:20px;text-align:center;color:#8c8c8c;">暂无处置记录</div>';
+      return;
+    }
+
+    container.innerHTML = actions.map(action => `
+      <div class="action-log-item">
+        <div class="action-log-header">
+          <span class="action-log-type ${action.actionType}">${this.getActionTypeLabel(action.actionType)}</span>
+          <span class="action-log-operator">${escapeHtml(action.operatorName)}</span>
+          <span class="action-log-time">${this.formatTime(action.createdAt)}</span>
+        </div>
+        <div class="action-log-content">${escapeHtml(action.description)}</div>
+        ${action.previewStateId ? `
+          <div class="action-log-detail">
+            预览目标: ${escapeHtml(action.previewStateId || '')}
+            ${action.previewAccepted ? ' · 可流转' : ' · 不可流转'}
+          </div>
+        ` : ''}
+      </div>
+    `).join('');
+  }
+
+  getActionTypeLabel(type) {
+    const labels = {
+      'inject_event': '💉 注入事件',
+      'jump_state': '⏭️ 跳过状态',
+      'terminate': '🛑 终止实例',
+      'modify_context': '✏️ 修改上下文',
+      'resume': '▶️ 恢复自动',
+      'unfreeze': '☀️ 完全解冻'
+    };
+    return labels[type] || type;
+  }
+
+  renderTakeoverActionPanel() {
+    const tab = this.takeoverCurrentTab;
+    const detail = this.takeoverSessionDetail;
+    const instance = detail?.instance;
+
+    document.querySelectorAll('.takeover-action-panel').forEach(p => p.style.display = 'none');
+    document.getElementById(`panel-${tab}`).style.display = 'block';
+
+    if (tab === 'inject') {
+      const events = detail?.availableEvents || [];
+      const select = document.getElementById('takeover-inject-event');
+      select.innerHTML = '<option value="">-- 选择事件 --</option>' +
+        events.map(e => `<option value="${e}">${e}</option>`).join('');
+      document.getElementById('takeover-inject-payload').value = '{}';
+    } else if (tab === 'jump') {
+      const states = detail?.reachableStates || [];
+      const select = document.getElementById('takeover-jump-target');
+      select.innerHTML = '<option value="">-- 选择目标状态 --</option>' +
+        states.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+    }
+
+    document.getElementById('takeover-preview-result').innerHTML = '';
+    this.takeoverPreviewResult = null;
+  }
+
+  previewTakeoverAction() {
+    const tab = this.takeoverCurrentTab;
+    const session = this.currentTakeoverSession;
+    let actionData = {};
+
+    if (tab === 'inject') {
+      const event = document.getElementById('takeover-inject-event').value;
+      const payloadStr = document.getElementById('takeover-inject-payload').value;
+      if (!event) {
+        toast('请选择事件', 'warning');
+        return;
+      }
+      try {
+        actionData = { event, payload: JSON.parse(payloadStr) };
+      } catch (e) {
+        toast('Payload 格式错误', 'error');
+        return;
+      }
+    } else if (tab === 'jump') {
+      const targetStateId = document.getElementById('takeover-jump-target').value;
+      const reason = document.getElementById('takeover-jump-reason').value;
+      if (!targetStateId) {
+        toast('请选择目标状态', 'warning');
+        return;
+      }
+      actionData = { targetStateId, reason };
+    } else if (tab === 'terminate') {
+      const reason = document.getElementById('takeover-terminate-reason').value;
+      actionData = { reason: reason || '人工终止' };
+    } else if (tab === 'context') {
+      const contextStr = document.getElementById('takeover-context-data').value;
+      try {
+        actionData = { context: JSON.parse(contextStr) };
+      } catch (e) {
+        toast('上下文格式错误', 'error');
+        return;
+      }
+    }
+
+    fetch(`/api/takeover/sessions/${session.id}/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        actionType: tab,
+        actionData: actionData
+      })
+    }).then(r => r.json()).then(result => {
+      this.takeoverPreviewResult = result;
+      this.renderPreviewResult(result);
+    }).catch(e => {
+      toast('预览失败: ' + e.message, 'error');
+    });
+  }
+
+  renderPreviewResult(result) {
+    const container = document.getElementById('takeover-preview-result');
+    if (!result.success) {
+      container.innerHTML = `
+        <div class="preview-result error">
+          <div class="preview-result-title">❌ 无法执行</div>
+          <div class="preview-result-content">${escapeHtml(result.error || '未知错误')}</div>
+        </div>
+      `;
+      return;
+    }
+
+    const prev = result.preview;
+    let html = `<div class="preview-result ${prev.accepted ? 'success' : 'warning'}">`;
+    html += `<div class="preview-result-title">${prev.accepted ? '✅ 可以执行' : '⚠️ 可能有问题'}</div>`;
+    html += `<div class="preview-result-content">`;
+
+    if (prev.targetStateId) {
+      html += `<div><strong>目标状态:</strong> ${escapeHtml(prev.targetStateName || prev.targetStateId)}</div>`;
+    }
+    if (prev.willBeFinal) {
+      html += `<div style="color:#52c41a;">🏁 将到达终态</div>`;
+    }
+    if (prev.hasTransitions) {
+      html += `<div>➡️ 将触发 ${prev.transitionCount || 0} 次状态流转</div>`;
+    }
+    if (prev.complianceIssues && prev.complianceIssues.length > 0) {
+      html += `<div style="color:#cf1322;margin-top:8px;">⚠️ 合规风险 (${prev.complianceIssues.length} 项):</div>`;
+      prev.complianceIssues.forEach(issue => {
+        html += `<div style="font-size:11px;color:#cf1322;margin-left:12px;">• ${escapeHtml(issue.message)}</div>`;
+      });
+    }
+    if (prev.warnings && prev.warnings.length > 0) {
+      html += `<div style="color:#d46b08;margin-top:8px;">⚠️ 警告:</div>`;
+      prev.warnings.forEach(w => {
+        html += `<div style="font-size:11px;color:#d46b08;margin-left:12px;">• ${escapeHtml(w)}</div>`;
+      });
+    }
+    if (prev.pendingEventsAfter > 0) {
+      html += `<div style="margin-top:8px;">📥 恢复后将处理 ${prev.pendingEventsAfter} 条排队事件</div>`;
+    }
+
+    html += `</div></div>`;
+    container.innerHTML = html;
+  }
+
+  executeTakeoverAction() {
+    if (!this.takeoverPreviewResult || !this.takeoverPreviewResult.success) {
+      toast('请先预览处置效果', 'warning');
+      return;
+    }
+
+    const tab = this.takeoverCurrentTab;
+    const session = this.currentTakeoverSession;
+    let actionData = {};
+    let description = '';
+
+    if (tab === 'inject') {
+      const event = document.getElementById('takeover-inject-event').value;
+      const payloadStr = document.getElementById('takeover-inject-payload').value;
+      const reason = document.getElementById('takeover-inject-reason').value;
+      actionData = { event, payload: JSON.parse(payloadStr), reason };
+      description = `注入事件 "${event}"${reason ? `: ${reason}` : ''}`;
+    } else if (tab === 'jump') {
+      const targetStateId = document.getElementById('takeover-jump-target').value;
+      const reason = document.getElementById('takeover-jump-reason').value;
+      const targetStateName = document.querySelector(`#takeover-jump-target option[value="${targetStateId}"]`)?.textContent || targetStateId;
+      actionData = { targetStateId, reason };
+      description = `跳转到 "${targetStateName}"${reason ? `: ${reason}` : ''}`;
+    } else if (tab === 'terminate') {
+      const reason = document.getElementById('takeover-terminate-reason').value;
+      actionData = { reason: reason || '人工终止' };
+      description = `终止实例: ${actionData.reason}`;
+    } else if (tab === 'context') {
+      const contextStr = document.getElementById('takeover-context-data').value;
+      const reason = document.getElementById('takeover-context-reason').value;
+      actionData = { context: JSON.parse(contextStr), reason };
+      description = `修改上下文${reason ? `: ${reason}` : ''}`;
+    }
+
+    if (!confirm(`确认执行: ${description}?`)) return;
+
+    fetch(`/api/takeover/sessions/${session.id}/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operatorId: this.takeoverOperatorId,
+        operatorName: this.takeoverOperatorName,
+        actionType: tab,
+        actionData: actionData,
+        description: description,
+        previewResult: this.takeoverPreviewResult.preview
+      })
+    }).then(r => r.json()).then(result => {
+      if (result.success) {
+        toast('✅ 处置已执行', 'success');
+        this.takeoverPreviewResult = null;
+        document.getElementById('takeover-preview-result').innerHTML = '';
+        this.loadTakeoverSessionDetail(session.id);
+      } else {
+        toast(result.error || '执行失败', 'error');
+      }
+    }).catch(e => {
+      toast('执行失败: ' + e.message, 'error');
+    });
+  }
+
+  resumeInstance() {
+    if (!confirm('确认恢复自动运行？排队事件将按顺序继续处理。')) return;
+
+    const session = this.currentTakeoverSession;
+    fetch(`/api/takeover/sessions/${session.id}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operatorId: this.takeoverOperatorId,
+        operatorName: this.takeoverOperatorName
+      })
+    }).then(r => r.json()).then(result => {
+      if (result.success) {
+        toast('▶️ 实例已恢复自动运行', 'success');
+        this.loadTakeoverSessionDetail(session.id);
+      } else {
+        toast(result.error || '恢复失败', 'error');
+      }
+    });
+  }
+
+  unfreezeInstance() {
+    if (!confirm('确认完全解冻并结束接管？实例将恢复正常运行。')) return;
+
+    const session = this.currentTakeoverSession;
+    fetch(`/api/takeover/sessions/${session.id}/unfreeze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operatorId: this.takeoverOperatorId,
+        operatorName: this.takeoverOperatorName
+      })
+    }).then(r => r.json()).then(result => {
+      if (result.success) {
+        toast('☀️ 实例已完全解冻', 'success');
+        this.currentTakeoverSession = null;
+        this.showTakeoverDashboard();
+      } else {
+        toast(result.error || '解冻失败', 'error');
+      }
+    });
   }
 
   formatTime(isoString) {

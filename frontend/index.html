@@ -14,6 +14,7 @@
       <button id="btn-publish" class="btn btn-primary">发布状态机</button>
       <button id="btn-open-market" class="btn">📦 模板市场</button>
       <button id="btn-open-simulation" class="btn" style="background: #722ed1;">🔬 推演实验室</button>
+      <button id="btn-open-takeover" class="btn" style="background: #d4380d;">🚨 人工接管工作台</button>
     </div>
   </header>
 
@@ -417,6 +418,207 @@
         <div class="migration-actions">
           <button id="btn-cancel-fork" class="btn">取消</button>
           <button id="btn-confirm-fork" class="btn btn-primary">创建分叉</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="takeover-modal" class="modal-overlay" style="display:none; z-index: 9999;">
+    <div class="modal" style="max-width: 1600px; width: 95vw; max-height: 95vh;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #d4380d 0%, #ad2102 100%);">
+        <h2>🚨 人工接管工作台</h2>
+        <button id="btn-close-takeover" class="modal-close">&times;</button>
+      </div>
+
+      <div id="takeover-main" class="takeover-main">
+        <div id="takeover-dashboard-view" class="takeover-view">
+          <div class="takeover-toolbar">
+            <div class="takeover-stats">
+              <div class="stat-card stat-active">
+                <div class="stat-count" id="tk-stat-active">0</div>
+                <div class="stat-label">接管中</div>
+              </div>
+              <div class="stat-card stat-observing">
+                <div class="stat-count" id="tk-stat-observing">0</div>
+                <div class="stat-label">观察中</div>
+              </div>
+              <div class="stat-card stat-frozen">
+                <div class="stat-count" id="tk-stat-frozen">0</div>
+                <div class="stat-label">已冻结</div>
+              </div>
+              <div class="stat-card stat-pending">
+                <div class="stat-count" id="tk-stat-pending">0</div>
+                <div class="stat-label">排队事件</div>
+              </div>
+            </div>
+            <div class="takeover-filters">
+              <select id="tk-filter-machine" class="form-control">
+                <option value="">全部状态机</option>
+              </select>
+              <select id="tk-filter-status" class="form-control">
+                <option value="">全部状态</option>
+                <option value="active">接管中</option>
+                <option value="observing">观察中</option>
+                <option value="resolved">已完成</option>
+              </select>
+              <button id="tk-refresh" class="btn btn-sm">🔄 刷新</button>
+            </div>
+          </div>
+
+          <div id="takeover-dashboard-list" class="takeover-dashboard-list"></div>
+        </div>
+
+        <div id="takeover-session-view" class="takeover-view" style="display:none;">
+          <div class="takeover-toolbar">
+            <button id="tk-back-to-dashboard" class="btn">&larr; 返回工作台</button>
+            <div class="session-header-info">
+              <h3 id="tk-session-title" style="margin:0;"></h3>
+              <div id="tk-session-meta" class="session-meta"></div>
+            </div>
+            <div class="session-actions">
+              <button id="tk-btn-observe" class="btn" style="background: #fa8c16;">⏸️ 进入观察</button>
+              <button id="tk-btn-resume" class="btn btn-primary">▶️ 恢复自动运行</button>
+              <button id="tk-btn-cancel" class="btn btn-danger">❌ 取消接管</button>
+            </div>
+          </div>
+
+          <div class="takeover-session-layout">
+            <div class="takeover-left-panel">
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <h4>📊 实例状态</h4>
+                </div>
+                <div class="panel-card-body">
+                  <div id="tk-instance-status" class="instance-status-grid"></div>
+                </div>
+              </div>
+
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <h4>📋 排队事件 <span id="tk-pending-count" class="badge badge-warning">0</span></h4>
+                </div>
+                <div class="panel-card-body" style="max-height: 200px; overflow-y: auto;">
+                  <div id="tk-pending-events" class="pending-events-list"></div>
+                </div>
+              </div>
+
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <h4>🚨 最近违规</h4>
+                </div>
+                <div class="panel-card-body" style="max-height: 200px; overflow-y: auto;">
+                  <div id="tk-recent-violations" class="violations-list"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="takeover-center-panel">
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <h4>🔀 状态流转历史</h4>
+                </div>
+                <div class="panel-card-body" style="max-height: 400px; overflow-y: auto;">
+                  <div id="tk-transition-history" class="transition-history-timeline"></div>
+                </div>
+              </div>
+
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <h4>📝 接管操作记录</h4>
+                </div>
+                <div class="panel-card-body" style="max-height: 300px; overflow-y: auto;">
+                  <div id="tk-takeover-actions" class="takeover-actions-log"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="takeover-right-panel">
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <h4>🎮 处置动作</h4>
+                  <span style="font-size:11px;color:#8c8c8c;">请先预览，确认后再执行</span>
+                </div>
+                <div class="panel-card-body">
+                  <div id="tk-action-tabs" class="action-tabs">
+                    <button class="action-tab active" data-tab="inject">补事件</button>
+                    <button class="action-tab" data-tab="jump">跳状态</button>
+                    <button class="action-tab" data-tab="terminate">结束</button>
+                  </div>
+
+                  <div id="tk-tab-inject" class="action-tab-content">
+                    <div class="form-group">
+                      <label>选择事件</label>
+                      <select id="tk-inject-event" class="form-control"></select>
+                    </div>
+                    <div class="form-group">
+                      <label>Payload (JSON)</label>
+                      <textarea id="tk-inject-payload" class="form-control" rows="3" placeholder='{"key": "value"}'></textarea>
+                    </div>
+                    <div class="form-group">
+                      <label>备注说明</label>
+                      <input type="text" id="tk-inject-note" class="form-control" placeholder="说明操作原因">
+                    </div>
+                    <div id="tk-inject-preview" class="preview-result"></div>
+                    <div class="btn-row">
+                      <button id="tk-btn-preview-inject" class="btn">🔍 预览结果</button>
+                      <button id="tk-btn-execute-inject" class="btn btn-primary" disabled>✅ 执行</button>
+                    </div>
+                  </div>
+
+                  <div id="tk-tab-jump" class="action-tab-content" style="display:none;">
+                    <div class="form-group">
+                      <label>跳转到状态</label>
+                      <select id="tk-jump-state" class="form-control"></select>
+                    </div>
+                    <div class="form-group">
+                      <label>上下文更新 (JSON, 可选)</label>
+                      <textarea id="tk-jump-context" class="form-control" rows="3" placeholder='{"field": "newValue"}'></textarea>
+                    </div>
+                    <div class="form-group">
+                      <label>备注说明</label>
+                      <input type="text" id="tk-jump-note" class="form-control" placeholder="说明跳转原因">
+                    </div>
+                    <div class="btn-row">
+                      <button id="tk-btn-execute-jump" class="btn btn-primary">✅ 执行跳转</button>
+                    </div>
+                  </div>
+
+                  <div id="tk-tab-terminate" class="action-tab-content" style="display:none;">
+                    <div class="terminate-warning">
+                      ⚠️ 此操作将立即结束实例，无法撤销
+                    </div>
+                    <div class="form-group">
+                      <label>结束原因</label>
+                      <textarea id="tk-terminate-reason" class="form-control" rows="3" placeholder="请说明结束原因"></textarea>
+                    </div>
+                    <div class="btn-row">
+                      <button id="tk-btn-execute-terminate" class="btn btn-danger">⚠️ 确认结束</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="takeover-confirm-modal" class="modal-overlay" style="display:none; z-index: 10001;">
+    <div class="modal" style="max-width: 500px;">
+      <div class="modal-header" style="background: #fa8c16;">
+        <h3>⚠️ 执行确认</h3>
+        <button id="btn-close-takeover-confirm" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="tk-confirm-content" style="padding: 20px 0;"></div>
+        <div class="form-group">
+          <label>您的姓名 <span style="color:#ff4d4f;">*</span></label>
+          <input type="text" id="tk-operator-name" class="form-control" placeholder="请输入您的姓名">
+        </div>
+        <div class="migration-actions">
+          <button id="tk-confirm-cancel" class="btn">取消</button>
+          <button id="tk-confirm-ok" class="btn btn-danger">确认执行</button>
         </div>
       </div>
     </div>

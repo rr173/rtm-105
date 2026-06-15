@@ -52,6 +52,29 @@ const {
   getBranchDetail,
   compareBranches
 } = require('./simulation-engine');
+const {
+  initTakeoverDB,
+  TAKEOVER_STATUS,
+  ACTION_TYPES,
+  isInstanceFrozen,
+  getFreezeInfo,
+  freezeInstance,
+  unfreezeInstance,
+  enqueueEvent,
+  getPendingEvents,
+  createTakeoverSession,
+  getActiveTakeoverSession,
+  getTakeoverSession,
+  getTakeoverSessionsByInstance,
+  getTakeoverActions,
+  previewActions,
+  executeTakeoverAction,
+  getTakeoverDashboard,
+  cancelTakeoverSession,
+  resumeTakeoverSession,
+  completeTakeoverSession,
+  processQueuedEvents
+} = require('./takeover-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -220,15 +243,24 @@ app.get('/api/machines/:machineId/instances', async (req, res) => {
       [req.params.machineId]
     );
 
-    const instances = rows.map(row => ({
-      id: row.id,
-      machineId: row.machine_id,
-      machineVersion: machine.version,
-      currentStateId: row.current_state_id,
-      context: JSON.parse(row.context_data),
-      createdAt: row.created_at,
-      isFinal: !!row.is_final,
-      timeoutInfo: buildTimeoutInfo(row.id, machine.definition, row.current_state_id, row.entered_state_at)
+    const instances = await Promise.all(rows.map(async row => {
+      const freezeInfo = await getFreezeInfo(row.id);
+      const activeTakeover = await getActiveTakeoverSession(row.id);
+      const pendingEvents = await getPendingEvents(row.id);
+      return {
+        id: row.id,
+        machineId: row.machine_id,
+        machineVersion: machine.version,
+        currentStateId: row.current_state_id,
+        context: JSON.parse(row.context_data),
+        createdAt: row.created_at,
+        isFinal: !!row.is_final,
+        timeoutInfo: buildTimeoutInfo(row.id, machine.definition, row.current_state_id, row.entered_state_at),
+        isFrozen: freezeInfo ? freezeInfo.isFrozen : false,
+        freezeInfo,
+        activeTakeover,
+        pendingEventCount: pendingEvents.length
+      };
     }));
 
     res.json(instances);
@@ -299,6 +331,28 @@ app.get('/api/instances/:id', async (req, res) => {
       triggeredBy: h.triggered_by || 'user'
     }));
 
+    const freezeInfo = await getFreezeInfo(req.params.id);
+    const activeTakeover = await getActiveTakeoverSession(req.params.id);
+    const pendingEvents = await getPendingEvents(req.params.id);
+    const takeoverSessions = await getTakeoverSessionsByInstance(req.params.id);
+
+    const violationsRows = await all(
+      'SELECT * FROM compliance_violations WHERE instance_id = ? ORDER BY attempted_at DESC LIMIT 20',
+      [req.params.id]
+    );
+    const recentViolations = violationsRows.map(v => ({
+      id: v.id,
+      policyId: v.policy_id,
+      policyName: v.policy_name,
+      policyType: v.policy_type,
+      eventName: v.event_name,
+      fromStateId: v.from_state_id,
+      toStateId: v.to_state_id,
+      reason: v.reason,
+      attemptedAt: v.attempted_at,
+      detectedDuring: v.detected_during
+    }));
+
     res.json({
       id: row.id,
       machineId: row.machine_id,
@@ -310,7 +364,12 @@ app.get('/api/instances/:id', async (req, res) => {
       isFinal: !!row.is_final,
       timeoutInfo: buildTimeoutInfo(row.id, machine ? machine.definition : null, row.current_state_id, row.entered_state_at),
       history,
-      migrationHistory
+      migrationHistory,
+      freezeInfo,
+      activeTakeover,
+      pendingEvents,
+      takeoverSessions,
+      recentViolations
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -385,7 +444,7 @@ app.post('/api/migration/execute', async (req, res) => {
 
 app.post('/api/instances/:id/send', async (req, res) => {
   try {
-    const { event, payload } = req.body;
+    const { event, payload, operatorId, operatorName } = req.body;
     if (!event) return res.status(400).json({ error: 'Event name required' });
 
     const row = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
@@ -393,6 +452,30 @@ app.post('/api/instances/:id/send', async (req, res) => {
 
     if (row.is_final) {
       return res.status(400).json({ error: 'Instance is in final state, cannot accept events' });
+    }
+
+    const frozen = await isInstanceFrozen(req.params.id);
+    if (frozen) {
+      const queued = await enqueueEvent(req.params.id, event, payload, operatorId || 'system');
+      const activeSession = await getActiveTakeoverSession(req.params.id);
+      if (activeSession) {
+        broadcastToMachine(row.machine_id, {
+          type: 'event_queued',
+          instanceId: req.params.id,
+          machineId: row.machine_id,
+          event,
+          queuedAt: queued.receivedAt,
+          takeoverSessionId: activeSession.id,
+          operatorName: activeSession.operatorName
+        });
+      }
+      return res.json({
+        queued: true,
+        queueId: queued.id,
+        event,
+        receivedAt: queued.receivedAt,
+        message: 'Instance is frozen, event has been queued'
+      });
     }
 
     const machine = await getMachineById(row.machine_id);
@@ -1033,9 +1116,540 @@ app.get('/api/simulations/branches/compare/:branchA/:branchB', async (req, res) 
   }
 });
 
+app.get('/api/takeover/dashboard', async (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.machineId) filters.machineId = req.query.machineId;
+    if (req.query.status) filters.status = req.query.status;
+    if (req.query.operatorId) filters.operatorId = req.query.operatorId;
+
+    const sessions = await getTakeoverDashboard(filters);
+
+    const enrichedSessions = [];
+    for (const session of sessions) {
+      const instance = await get('SELECT * FROM instances WHERE id = ?', [session.instanceId]);
+      const machine = instance ? await getMachineById(instance.machine_id) : null;
+      const currentState = machine?.definition.states.find(s => s.id === instance.current_state_id);
+      const pendingEvents = await getPendingEvents(session.instanceId);
+      const violations = await all(
+        'SELECT COUNT(*) as cnt FROM compliance_violations WHERE instance_id = ? AND attempted_at > datetime("now", "-7 days")',
+        [session.instanceId]
+      );
+      const freezeInfo = await getFreezeInfo(session.instanceId);
+
+      enrichedSessions.push({
+        ...session,
+        isFrozen: freezeInfo?.isFrozen || false,
+        instance: {
+          id: instance?.id,
+          machineId: instance?.machine_id,
+          currentStateId: instance?.current_state_id,
+          currentStateName: currentState?.name || instance?.current_state_id,
+          isFinal: !!instance?.is_final,
+          pendingEventCount: pendingEvents.length,
+          recentViolationCount: violations[0]?.cnt || 0
+        }
+      });
+    }
+
+    const stats = {
+      total: enrichedSessions.length,
+      active: enrichedSessions.filter(s => s.status === TAKEOVER_STATUS.ACTIVE).length,
+      observing: enrichedSessions.filter(s => s.status === TAKEOVER_STATUS.OBSERVING).length,
+      resolved: enrichedSessions.filter(s => s.status === TAKEOVER_STATUS.RESOLVED).length,
+      frozen: enrichedSessions.filter(s => s.isFrozen).length,
+      pendingEvents: enrichedSessions.reduce((sum, s) => sum + s.instance.pendingEventCount, 0)
+    };
+
+    res.json({
+      success: true,
+      sessions: enrichedSessions,
+      stats
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/takeover/sessions', async (req, res) => {
+  try {
+    const { instanceId, operatorId, operatorName, note } = req.body;
+    if (!instanceId || !operatorId || !operatorName) {
+      return res.status(400).json({ error: 'instanceId, operatorId, and operatorName are required' });
+    }
+
+    const session = await createTakeoverSession(instanceId, operatorId, operatorName, note);
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [instanceId]);
+
+    broadcastToMachine(instance.machine_id, {
+      type: 'takeover_started',
+      instanceId,
+      machineId: instance.machine_id,
+      sessionId: session.id,
+      operatorId,
+      operatorName,
+      startedAt: session.startedAt
+    });
+
+    res.json(session);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/takeover/sessions/:sessionId', async (req, res) => {
+  try {
+    const session = await getTakeoverSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
+
+    const actions = await getTakeoverActions(req.params.sessionId);
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [session.instanceId]);
+    const machine = instance ? await getMachineById(instance.machine_id) : null;
+    const pendingEvents = await getPendingEvents(session.instanceId);
+    const freezeInfo = await getFreezeInfo(session.instanceId);
+
+    const historyRows = await all(
+      'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
+      [session.instanceId]
+    );
+
+    const violationRows = await all(
+      'SELECT * FROM compliance_violations WHERE instance_id = ? ORDER BY attempted_at DESC LIMIT 20',
+      [session.instanceId]
+    );
+
+    const currentState = machine?.definition.states.find(s => s.id === instance.current_state_id);
+    const availableEvents = currentState?.transitions 
+      ? [...new Set(currentState.transitions.map(t => t.event))]
+      : [];
+
+    const reachableStates = machine?.definition.states.filter(s => !s.isInitial) || [];
+
+    const stateDiagram = machine ? {
+      states: machine.definition.states,
+      transitions: machine.definition.transitions,
+      currentStateId: instance.current_state_id
+    } : null;
+
+    function safeParseJSON(str) {
+      if (!str) return {};
+      if (typeof str === 'object') return str;
+      try { return JSON.parse(str); } catch (e) { return {}; }
+    }
+
+    res.json({
+      success: true,
+      detail: {
+        session,
+        instance: instance ? {
+          id: instance.id,
+          machineId: instance.machine_id,
+          currentStateId: instance.current_state_id,
+          currentStateName: currentState?.name || instance.current_state_id,
+          context: safeParseJSON(instance.context_data),
+          isFinal: !!instance.is_final,
+          freezeInfo: freezeInfo,
+          activeTakeover: session.status === 'active' ? {
+            operatorId: session.operatorId,
+            operatorName: session.operatorName,
+            sessionId: session.id
+          } : null
+        } : null,
+        pendingEvents: pendingEvents.map(e => ({
+          id: e.id,
+          eventName: e.eventName,
+          payload: safeParseJSON(e.payload),
+          receivedAt: e.receivedAt,
+          queuedBy: e.queuedBy
+        })),
+        flowHistory: historyRows.map(h => ({
+          id: h.id,
+          eventName: h.event_name,
+          fromStateId: h.from_state_id,
+          toStateId: h.to_state_id,
+          toStateName: machine?.definition.states.find(s => s.id === h.to_state_id)?.name || h.to_state_id,
+          createdAt: h.created_at,
+          guardResult: h.guard_result ? JSON.parse(h.guard_result) : null,
+          complianceResult: h.compliance_result ? JSON.parse(h.compliance_result) : null,
+          isTimeout: h.triggered_by === 'timeout'
+        })),
+        actionLogs: actions.map(a => ({
+          id: a.id,
+          actionType: a.actionType,
+          description: a.note,
+          operatorId: a.operatorId,
+          operatorName: a.operatorName,
+          createdAt: a.actionTime,
+          fromStateId: a.fromStateId,
+          toStateId: a.toStateId,
+          eventName: a.eventName,
+          eventPayload: a.eventPayload,
+          previewOnly: a.previewOnly
+        })),
+        recentViolations: violationRows.map(v => ({
+          id: v.id,
+          policyName: v.policy_name,
+          reason: v.reason,
+          attemptedAt: v.attempted_at,
+          eventName: v.event_name
+        })),
+        availableEvents,
+        reachableStates,
+        stateDiagram
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/takeover/instances/:instanceId/sessions', async (req, res) => {
+  try {
+    const sessions = await getTakeoverSessionsByInstance(req.params.instanceId);
+    res.json(sessions);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/takeover/instances/:instanceId/preview-actions', async (req, res) => {
+  try {
+    const row = await get('SELECT * FROM instances WHERE id = ?', [req.params.instanceId]);
+    if (!row) return res.status(404).json({ error: 'Instance not found' });
+
+    const machine = await getMachineById(row.machine_id);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    const preview = await previewActions(req.params.instanceId, machine.definition);
+    res.json(preview);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/takeover/sessions/:sessionId/execute', async (req, res) => {
+  try {
+    const { actionType, actionData, description, previewResult, operatorId, operatorName } = req.body;
+    if (!actionType) {
+      return res.status(400).json({ success: false, error: 'actionType is required' });
+    }
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ success: false, error: 'operatorId and operatorName are required' });
+    }
+
+    const session = await getTakeoverSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
+
+    if (session.operatorId !== operatorId) {
+      return res.status(403).json({ success: false, error: 'Only the takeover operator can execute actions' });
+    }
+
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [session.instanceId]);
+    if (!instance) return res.status(404).json({ success: false, error: 'Instance not found' });
+
+    const machine = await getMachineById(instance.machine_id);
+    if (!machine) return res.status(404).json({ success: false, error: 'Machine not found' });
+
+    const action = {
+      actionType: actionType === 'inject' ? 'inject_event' :
+                  actionType === 'jump' ? 'jump_to_state' :
+                  actionType === 'terminate' ? 'terminate' :
+                  actionType === 'context' ? 'modify_context' : actionType,
+      ...actionData,
+      note: description,
+      previewStateId: previewResult?.targetStateId,
+      previewAccepted: previewResult?.accepted
+    };
+
+    const result = await executeTakeoverAction(
+      req.params.sessionId,
+      action,
+      operatorId,
+      operatorName,
+      machine.definition
+    );
+
+    broadcastToMachine(instance.machine_id, {
+      type: 'takeover_action',
+      instanceId: session.instanceId,
+      machineId: instance.machine_id,
+      sessionId: req.params.sessionId,
+      actionType: action.actionType,
+      operatorId,
+      operatorName,
+      timestamp: result.action.actionTime,
+      fromStateId: result.action.fromStateId,
+      toStateId: result.action.toStateId,
+      eventName: result.action.eventName
+    });
+
+    if (action.actionType === ACTION_TYPES.RESUME_AUTO) {
+      broadcastToMachine(instance.machine_id, {
+        type: 'takeover_ended',
+        instanceId: session.instanceId,
+        machineId: instance.machine_id,
+        sessionId: req.params.sessionId,
+        operatorId,
+        operatorName,
+        status: TAKEOVER_STATUS.RESOLVED
+      });
+    }
+
+    res.json({ success: true, ...result });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/takeover/sessions/:sessionId/cancel', async (req, res) => {
+  try {
+    const { operatorId, operatorName } = req.body;
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ error: 'operatorId and operatorName are required' });
+    }
+
+    const session = await getTakeoverSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const result = await cancelTakeoverSession(req.params.sessionId, operatorId, operatorName);
+
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [session.instanceId]);
+    if (instance) {
+      broadcastToMachine(instance.machine_id, {
+        type: 'takeover_ended',
+        instanceId: session.instanceId,
+        machineId: instance.machine_id,
+        sessionId: req.params.sessionId,
+        operatorId,
+        operatorName,
+        status: TAKEOVER_STATUS.CANCELLED
+      });
+    }
+
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/takeover/sessions/:sessionId/preview', async (req, res) => {
+  try {
+    const { actionType, actionData } = req.body;
+    if (!actionType) return res.status(400).json({ error: 'actionType is required' });
+
+    const session = await getTakeoverSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [session.instanceId]);
+    const machine = await getMachineById(instance.machine_id);
+
+    const preview = await previewActions(instance.id, machine.definition, actionType, actionData);
+    res.json({ success: true, preview });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/takeover/sessions/:sessionId/resume', async (req, res) => {
+  try {
+    const { operatorId, operatorName } = req.body;
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ error: 'operatorId and operatorName are required' });
+    }
+
+    const session = await getTakeoverSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (session.operatorId !== operatorId) {
+      return res.status(403).json({ error: 'Only the takeover operator can resume' });
+    }
+
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [session.instanceId]);
+    const machine = await getMachineById(instance.machine_id);
+
+    const result = await resumeTakeoverSession(req.params.sessionId, operatorId, operatorName);
+
+    const pending = await getPendingEvents(session.instanceId);
+    if (pending.length > 0) {
+      await processQueuedEvents(session.instanceId, machine.definition);
+    }
+
+    broadcastToMachine(instance.machine_id, {
+      type: 'takeover_action',
+      instanceId: session.instanceId,
+      machineId: instance.machine_id,
+      sessionId: req.params.sessionId,
+      actionType: 'resume',
+      operatorId,
+      operatorName
+    });
+
+    res.json({ success: true, ...result });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/takeover/sessions/:sessionId/unfreeze', async (req, res) => {
+  try {
+    const { operatorId, operatorName } = req.body;
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ error: 'operatorId and operatorName are required' });
+    }
+
+    const session = await getTakeoverSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (session.operatorId !== operatorId) {
+      return res.status(403).json({ error: 'Only the takeover operator can unfreeze' });
+    }
+
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [session.instanceId]);
+    const machine = await getMachineById(instance.machine_id);
+
+    const unfreezeResult = await unfreezeInstance(session.instanceId, operatorId, operatorName);
+    const completeResult = await completeTakeoverSession(req.params.sessionId, operatorId, operatorName, 'completed');
+
+    const pending = await getPendingEvents(session.instanceId);
+    if (pending.length > 0) {
+      await processQueuedEvents(session.instanceId, machine.definition);
+    }
+
+    broadcastToMachine(instance.machine_id, {
+      type: 'instance_unfrozen',
+      instanceId: session.instanceId,
+      machineId: instance.machine_id,
+      unfrozenBy: operatorId,
+      unfrozenByName: operatorName,
+      unfrozenAt: unfreezeResult.unfrozenAt
+    });
+
+    broadcastToMachine(instance.machine_id, {
+      type: 'takeover_ended',
+      instanceId: session.instanceId,
+      machineId: instance.machine_id,
+      sessionId: req.params.sessionId,
+      operatorId,
+      operatorName,
+      status: TAKEOVER_STATUS.RESOLVED
+    });
+
+    res.json({ success: true, ...completeResult, ...unfreezeResult });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/instances/:id/freeze', async (req, res) => {
+  try {
+    const { operatorId, operatorName, reason } = req.body;
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ error: 'operatorId and operatorName are required' });
+    }
+
+    const result = await freezeInstance(req.params.id, operatorId, operatorName, reason);
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
+
+    broadcastToMachine(instance.machine_id, {
+      type: 'instance_frozen',
+      instanceId: req.params.id,
+      machineId: instance.machine_id,
+      frozenBy: operatorId,
+      frozenByName: operatorName,
+      frozenAt: result.frozenAt,
+      reason
+    });
+
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/instances/:id/unfreeze', async (req, res) => {
+  try {
+    const { operatorId, operatorName } = req.body;
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ error: 'operatorId and operatorName are required' });
+    }
+
+    const result = await unfreezeInstance(req.params.id, operatorId, operatorName);
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
+    const machine = await getMachineById(instance.machine_id);
+
+    broadcastToMachine(instance.machine_id, {
+      type: 'instance_unfrozen',
+      instanceId: req.params.id,
+      machineId: instance.machine_id,
+      unfrozenBy: operatorId,
+      unfrozenByName: operatorName,
+      unfrozenAt: result.unfrozenAt
+    });
+
+    const pending = await getPendingEvents(req.params.id);
+    if (pending.length > 0 && machine) {
+      const processResults = await processQueuedEvents(req.params.id, machine.definition);
+
+      for (const r of processResults) {
+        if (r.success && r.result) {
+          broadcastToMachine(instance.machine_id, {
+            type: 'transition',
+            instanceId: req.params.id,
+            machineId: instance.machine_id,
+            fromStateId: r.result.fromStateId,
+            toStateId: r.result.toStateId,
+            event: r.eventName,
+            triggeredBy: 'queued_event',
+            timestamp: r.result.timestamp,
+            isFinal: r.result.isFinal
+          });
+        }
+      }
+    }
+
+    res.json({ ...result, processedEvents: pending.length });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/instances/:id/pending-events', async (req, res) => {
+  try {
+    const events = await getPendingEvents(req.params.id);
+    res.json(events);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/instances/:id/takeover', async (req, res) => {
+  try {
+    const { operatorId, operatorName, note } = req.body;
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ error: 'operatorId and operatorName are required' });
+    }
+
+    const session = await createTakeoverSession(req.params.id, operatorId, operatorName, note);
+    const instance = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
+
+    broadcastToMachine(instance.machine_id, {
+      type: 'takeover_started',
+      instanceId: req.params.id,
+      machineId: instance.machine_id,
+      sessionId: session.id,
+      operatorId,
+      operatorName,
+      startedAt: session.startedAt
+    });
+
+    res.json(session);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 async function start() {
   try {
     await initDB();
+    await initTakeoverDB();
     await seedDemoData();
     await rebuildAllTimers();
     server.listen(PORT, () => {

@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const { evaluateGuard } = require('./guard');
 const { recordStateDuration } = require('./metrics');
 const { checkTransitionCompliance } = require('./compliance-engine');
+const { isInstanceFrozen } = require('./takeover-engine');
 
 const activeTimers = new Map();
 
@@ -35,6 +36,12 @@ function clearInstanceTimeout(instanceId) {
 
 async function sendTimeoutEvent(instanceId, timeoutConfig) {
   const { event, payload } = timeoutConfig;
+
+  const frozen = await isInstanceFrozen(instanceId);
+  if (frozen) {
+    console.log(`[Timeout] Instance ${instanceId} is frozen, skipping timeout event ${event}`);
+    return;
+  }
 
   const row = await get('SELECT * FROM instances WHERE id = ?', [instanceId]);
   if (!row) {
@@ -197,6 +204,11 @@ async function rebuildAllTimers() {
   let rebuilt = 0;
   for (const row of rows) {
     try {
+      const frozen = await isInstanceFrozen(row.id);
+      if (frozen) {
+        console.log(`[Timeout] Skipping frozen instance ${row.id}`);
+        continue;
+      }
       const definition = JSON.parse(row.definition);
       const currentState = definition.states.find(s => s.id === row.current_state_id);
       if (currentState && currentState.timeout) {
