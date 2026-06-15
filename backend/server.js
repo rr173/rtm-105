@@ -75,6 +75,18 @@ const {
   completeTakeoverSession,
   processQueuedEvents
 } = require('./takeover-engine');
+const {
+  SEVERITY,
+  ISSUE_TYPES,
+  analyzeMachineDefinition,
+  initAnalysisDB,
+  saveAnalysisReport,
+  getAnalysisReportById,
+  getAnalysisReportsByMachine,
+  getAnalysisReportsByMachineAndVersion,
+  getLatestAnalysisReport,
+  runAnalysisForMachine
+} = require('./static-analysis');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -197,19 +209,39 @@ app.post('/api/machines', async (req, res) => {
       return res.status(400).json({ error: 'Must have at least one final state' });
     }
 
+    const definition = { states, transitions };
+    const analysisResult = analyzeMachineDefinition(definition);
+
     const existing = await get('SELECT MAX(version) as v FROM machines WHERE name = ?', [name]);
     const version = existing && existing.v ? existing.v + 1 : 1;
 
     const id = uuidv4();
     const now = new Date().toISOString();
-    const definition = JSON.stringify({ states, transitions });
 
     await run(
       'INSERT INTO machines (id, name, version, created_at, definition) VALUES (?, ?, ?, ?, ?)',
-      [id, name, version, now, definition]
+      [id, name, version, now, JSON.stringify(definition)]
     );
 
-    res.json(await getMachineById(id));
+    const machine = await getMachineById(id);
+    const report = await saveAnalysisReport({
+      machineId: id,
+      machineVersion: version,
+      machineName: name,
+      analysisResult,
+      triggeredBy: 'publish',
+      definitionSnapshot: definition
+    });
+
+    if (!analysisResult.pass) {
+      return res.status(422).json({
+        error: 'Static analysis failed with blocking issues. Machine was created but cannot be used until issues are resolved.',
+        analysisReport: report,
+        machine
+      });
+    }
+
+    res.json({ ...machine, latestAnalysisReport: report });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1648,12 +1680,132 @@ app.post('/api/instances/:id/takeover', async (req, res) => {
   }
 });
 
+app.get('/api/analysis/severity-levels', async (req, res) => {
+  res.json({
+    blocking: SEVERITY.BLOCKING,
+    warning: SEVERITY.WARNING,
+    advisory: SEVERITY.ADVISORY
+  });
+});
+
+app.get('/api/analysis/issue-types', async (req, res) => {
+  res.json({
+    unreachableState: ISSUE_TYPES.UNREACHABLE_STATE,
+    deadEndState: ISSUE_TYPES.DEAD_END_STATE,
+    noExitLoop: ISSUE_TYPES.NO_EXIT_LOOP,
+    guardCoverageGap: ISSUE_TYPES.GUARD_COVERAGE_GAP
+  });
+});
+
+app.post('/api/analysis/validate', async (req, res) => {
+  try {
+    const { states, transitions } = req.body;
+    if (!Array.isArray(states) || !Array.isArray(transitions)) {
+      return res.status(400).json({ error: 'states and transitions arrays are required' });
+    }
+
+    const result = analyzeMachineDefinition({ states, transitions });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/machines/:machineId/analysis', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    const triggeredBy = (req.body && req.body.triggeredBy) || 'manual';
+    const report = await runAnalysisForMachine(machine, triggeredBy);
+
+    res.status(201).json(report);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/analysis', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const reports = await getAnalysisReportsByMachine(req.params.machineId, limit);
+    res.json(reports);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/analysis/latest', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    const report = await getLatestAnalysisReport(req.params.machineId);
+    if (!report) return res.status(404).json({ error: 'No analysis report found' });
+    res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/analysis/version/:version', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    const version = parseInt(req.params.version, 10);
+    if (isNaN(version)) return res.status(400).json({ error: 'Invalid version' });
+
+    const reports = await getAnalysisReportsByMachineAndVersion(req.params.machineId, version);
+    res.json(reports);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/analysis/:reportId', async (req, res) => {
+  try {
+    const report = await getAnalysisReportById(req.params.reportId);
+    if (!report) return res.status(404).json({ error: 'Analysis report not found' });
+    res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 async function start() {
   try {
     await initDB();
     await initTakeoverDB();
+    await initAnalysisDB();
     await seedDemoData();
     await rebuildAllTimers();
+
+    const orderMachineRow = await get('SELECT * FROM machines WHERE name = ? ORDER BY version DESC LIMIT 1', ['订单审批']);
+    if (orderMachineRow) {
+      try {
+        const orderMachine = {
+          id: orderMachineRow.id,
+          name: orderMachineRow.name,
+          version: orderMachineRow.version,
+          createdAt: orderMachineRow.created_at,
+          definition: JSON.parse(orderMachineRow.definition)
+        };
+        const existingReport = await getLatestAnalysisReport(orderMachine.id);
+        if (!existingReport) {
+          const report = await runAnalysisForMachine(orderMachine, 'startup');
+          console.log(`[Static Analysis] Analyzed 订单审批 state machine on startup: pass=${report.pass}, issues=${report.summary.total}, blocking=${report.summary.blockingCount}, warning=${report.summary.warningCount}`);
+        } else {
+          console.log(`[Static Analysis] 订单审批 state machine already has analysis report, skipping.`);
+        }
+      } catch (analyzeErr) {
+        console.error('[Static Analysis] Failed to analyze 订单审批 state machine on startup:', analyzeErr);
+      }
+    }
+
     server.listen(PORT, () => {
       console.log(`Workflow server running on port ${PORT}`);
     });
