@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const { recordStateDuration } = require('./metrics');
 const { isInstanceFrozen } = require('./takeover-engine');
 const { buildAndSaveTrace, linkTraceToTransition } = require('./decision-trace');
+const { resolveSlaViolation } = require('./sla-engine');
 
 const activeTimers = new Map();
 
@@ -130,6 +131,7 @@ async function sendTimeoutEvent(instanceId, timeoutConfig) {
   await linkTraceToTransition(traceResult.traceId, transitionId);
 
   await recordStateDuration(row.id, row.machine_id, currentStateId, row.entered_state_at || row.created_at, now);
+  await resolveSlaViolation(row.id, currentStateId, row.entered_state_at || row.created_at, now, false);
   if (targetState.isFinal) {
     await recordStateDuration(row.id, row.machine_id, targetState.id, now, now);
   }

@@ -108,6 +108,19 @@ const {
   linkTraceToTransition,
   saveTrace
 } = require('./decision-trace');
+const {
+  initSlaDB,
+  setSlaRule,
+  getSlaRuleById,
+  getSlaRulesByMachineId,
+  deleteSlaRule,
+  getSlaViolations,
+  getSlaComplianceStats,
+  startSlaScanner,
+  setBroadcast: setSlaBroadcast,
+  seedDemoSlaData,
+  resolveSlaViolation
+} = require('./sla-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -130,6 +143,7 @@ function broadcastToMachine(machineId, message) {
 }
 
 setBroadcast(broadcastToMachine);
+setSlaBroadcast(broadcastToMachine);
 
 function buildTimeoutInfo(instanceId, machineDefinition, currentStateId, enteredStateAt) {
   const scheduled = getTimeoutInfoForInstance(instanceId);
@@ -637,6 +651,7 @@ app.post('/api/instances/:id/send', async (req, res) => {
     await linkTraceToTransition(traceResult.traceId, transitionId);
 
     await recordStateDuration(row.id, row.machine_id, currentStateId, row.entered_state_at || row.created_at, now);
+    await resolveSlaViolation(row.id, currentStateId, row.entered_state_at || row.created_at, now, false);
     if (targetState.isFinal) {
       await recordStateDuration(row.id, row.machine_id, targetState.id, now, now);
     }
@@ -2016,6 +2031,121 @@ app.get('/api/instances/:id/traces', async (req, res) => {
   }
 });
 
+app.get('/api/machines/:machineId/sla/rules', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const includeDisabled = req.query.includeDisabled === 'true' || req.query.includeDisabled === '1';
+    const rules = await getSlaRulesByMachineId(req.params.machineId, { includeDisabled });
+    res.json(rules);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/machines/:machineId/sla/rules', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const { stateId, maxSeconds, enabled } = req.body;
+    if (!stateId || typeof maxSeconds !== 'number' || maxSeconds <= 0) {
+      return res.status(400).json({ error: 'stateId and positive maxSeconds are required' });
+    }
+    const rule = await setSlaRule({
+      machineId: req.params.machineId,
+      stateId,
+      maxSeconds,
+      enabled: enabled !== false
+    });
+    res.status(201).json(rule);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/sla/rules/:id', async (req, res) => {
+  try {
+    const rule = await getSlaRuleById(req.params.id);
+    if (!rule) return res.status(404).json({ error: 'SLA rule not found' });
+    res.json(rule);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/sla/rules/:id', async (req, res) => {
+  try {
+    const existing = await getSlaRuleById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'SLA rule not found' });
+    const { maxSeconds, enabled } = req.body;
+    const rule = await setSlaRule({
+      machineId: existing.machineId,
+      stateId: existing.stateId,
+      maxSeconds: typeof maxSeconds === 'number' ? maxSeconds : existing.maxSeconds,
+      enabled: enabled !== undefined ? enabled : existing.enabled
+    });
+    res.json(rule);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/sla/rules/:id', async (req, res) => {
+  try {
+    const deleted = await deleteSlaRule(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'SLA rule not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/sla/violations', async (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.machineId) filters.machineId = req.query.machineId;
+    if (req.query.instanceId) filters.instanceId = req.query.instanceId;
+    if (req.query.stateId) filters.stateId = req.query.stateId;
+    if (req.query.fromTime) filters.fromTime = req.query.fromTime;
+    if (req.query.toTime) filters.toTime = req.query.toTime;
+    if (req.query.resolved !== undefined) {
+      filters.resolved = req.query.resolved === 'true' || req.query.resolved === '1';
+    }
+    if (req.query.limit) {
+      const n = parseInt(req.query.limit, 10);
+      if (!isNaN(n) && n > 0) filters.limit = n;
+    }
+    if (req.query.offset) {
+      const n = parseInt(req.query.offset, 10);
+      if (!isNaN(n) && n >= 0) filters.offset = n;
+    }
+    const violations = await getSlaViolations(filters);
+    res.json(violations);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/sla/compliance', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const timeFilter = {};
+    if (req.query.from) {
+      const d = new Date(req.query.from);
+      if (!isNaN(d.getTime())) timeFilter.from = d.toISOString();
+    }
+    if (req.query.to) {
+      const d = new Date(req.query.to);
+      if (!isNaN(d.getTime())) timeFilter.to = d.toISOString();
+    }
+    const stats = await getSlaComplianceStats(req.params.machineId, timeFilter);
+    res.json(stats);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 async function seedDemoTraces() {
   const traceCount = await get('SELECT COUNT(*) as cnt FROM decision_traces');
   if (traceCount.cnt > 0) {
@@ -2386,9 +2516,12 @@ async function start() {
     await initTakeoverDB();
     await initAnalysisDB();
     await initTraceDB();
+    await initSlaDB();
     await seedDemoData();
     await seedDemoTraces();
+    await seedDemoSlaData();
     await rebuildAllTimers();
+    startSlaScanner(10);
 
     const orderMachineRow = await get('SELECT * FROM machines WHERE name = ? ORDER BY version DESC LIMIT 1', ['订单审批']);
     if (orderMachineRow) {
