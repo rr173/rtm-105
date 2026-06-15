@@ -346,6 +346,29 @@ function initDB() {
 
         CREATE INDEX IF NOT EXISTS idx_batch_results_batch ON batch_operation_results(batch_operation_id);
         CREATE INDEX IF NOT EXISTS idx_batch_results_instance ON batch_operation_results(instance_id);
+
+        CREATE TABLE IF NOT EXISTS decision_traces (
+          id TEXT PRIMARY KEY,
+          instance_id TEXT NOT NULL,
+          machine_id TEXT NOT NULL,
+          transition_id TEXT,
+          event_name TEXT NOT NULL,
+          from_state_id TEXT NOT NULL,
+          target_state_id TEXT,
+          decision_result TEXT NOT NULL,
+          rejection_reason TEXT,
+          decision_tree_json TEXT NOT NULL,
+          total_duration_ms INTEGER,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (instance_id) REFERENCES instances(id),
+          FOREIGN KEY (machine_id) REFERENCES machines(id),
+          FOREIGN KEY (transition_id) REFERENCES transitions(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_decision_traces_instance ON decision_traces(instance_id);
+        CREATE INDEX IF NOT EXISTS idx_decision_traces_machine ON decision_traces(machine_id);
+        CREATE INDEX IF NOT EXISTS idx_decision_traces_created ON decision_traces(created_at);
+        CREATE INDEX IF NOT EXISTS idx_decision_traces_result ON decision_traces(decision_result);
       `, (err) => {
         if (err) return reject(err);
         migrateDB().then(resolve).catch(reject);

@@ -517,6 +517,95 @@ async function auditCompletedInstances(machineId, { machineDefinition, policiesO
   };
 }
 
+function getTriggeredCondition(policy) {
+  const config = policy.config || {};
+  switch (policy.type) {
+    case POLICY_TYPES.FORBIDDEN_SEQUENCE:
+      return `状态序列 [${(config.sequence || []).join(' → ')}] 出现时触发`;
+    case POLICY_TYPES.MANDATORY_DWELL:
+      return `在状态 [${config.stateName || ''}] 停留不足 ${config.minSeconds || 0} 秒时触发`;
+    case POLICY_TYPES.EVENT_RATE_LIMIT:
+      return `事件 [${config.eventName || ''}] 在 ${config.windowSeconds || 0} 秒内超过 ${config.maxCount || 0} 次时触发`;
+    default:
+      return null;
+  }
+}
+
+function evaluatePoliciesDetailed(policies, context) {
+  const results = [];
+  if (!Array.isArray(policies)) return results;
+  for (const policy of policies) {
+    if (!policy.enabled) {
+      results.push({
+        policyId: policy.id,
+        policyName: policy.name,
+        policyType: policy.type,
+        enabled: false,
+        result: 'skipped',
+        reason: null,
+        detail: null,
+        triggeredCondition: null,
+        durationMs: 0
+      });
+      continue;
+    }
+    const start = Date.now();
+    let violation = null;
+    try {
+      switch (policy.type) {
+        case POLICY_TYPES.FORBIDDEN_SEQUENCE:
+          violation = checkForbiddenSequence(policy, context);
+          break;
+        case POLICY_TYPES.MANDATORY_DWELL:
+          violation = checkMandatoryDwell(policy, context);
+          break;
+        case POLICY_TYPES.EVENT_RATE_LIMIT:
+          violation = checkEventRateLimit(policy, context);
+          break;
+      }
+    } catch (e) {
+      results.push({
+        policyId: policy.id,
+        policyName: policy.name,
+        policyType: policy.type,
+        enabled: true,
+        result: 'error',
+        reason: e.message,
+        detail: null,
+        triggeredCondition: getTriggeredCondition(policy),
+        durationMs: Date.now() - start
+      });
+      continue;
+    }
+    if (violation) {
+      results.push({
+        policyId: policy.id,
+        policyName: policy.name,
+        policyType: policy.type,
+        enabled: true,
+        result: 'violation',
+        reason: violation.reason,
+        detail: violation.detail,
+        triggeredCondition: getTriggeredCondition(policy),
+        durationMs: Date.now() - start
+      });
+    } else {
+      results.push({
+        policyId: policy.id,
+        policyName: policy.name,
+        policyType: policy.type,
+        enabled: true,
+        result: 'pass',
+        reason: null,
+        detail: null,
+        triggeredCondition: getTriggeredCondition(policy),
+        durationMs: Date.now() - start
+      });
+    }
+  }
+  return results;
+}
+
 module.exports = {
   POLICY_TYPES,
   validatePolicy,
@@ -531,8 +620,10 @@ module.exports = {
   auditInstanceHistory,
   auditCompletedInstances,
   evaluatePolicies,
+  evaluatePoliciesDetailed,
   checkForbiddenSequence,
   checkMandatoryDwell,
   checkEventRateLimit,
-  buildStateNameMap
+  buildStateNameMap,
+  getTriggeredCondition
 };

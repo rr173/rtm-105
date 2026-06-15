@@ -27,9 +27,9 @@ const {
   getPolicyById,
   getPoliciesByMachineId,
   getViolations,
-  checkTransitionCompliance,
   auditInstanceHistory,
-  auditCompletedInstances
+  auditCompletedInstances,
+  recordViolation
 } = require('./compliance-engine');
 const {
   getMachineVersionsByName,
@@ -98,6 +98,16 @@ const {
   listBatchOperations,
   getBatchOperationDetail
 } = require('./batch-engine');
+const {
+  initTraceDB,
+  getTraceById,
+  queryTraces,
+  getTracesByInstanceId,
+  countTraces,
+  buildAndSaveTrace,
+  linkTraceToTransition,
+  saveTrace
+} = require('./decision-trace');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -528,29 +538,6 @@ app.post('/api/instances/:id/send', async (req, res) => {
     const context = JSON.parse(row.context_data);
     const currentStateId = row.current_state_id;
 
-    const outgoing = machine.definition.transitions.filter(
-      t => t.sourceStateId === currentStateId && t.event === event
-    );
-
-    let matchedTransition = null;
-    for (const t of outgoing) {
-      try {
-        if (evaluateGuard(t.guard, payload || {}, context)) {
-          matchedTransition = t;
-          break;
-        }
-      } catch (e) {
-        console.error('Guard evaluation error:', e);
-      }
-    }
-
-    if (!matchedTransition) {
-      return res.status(400).json({ error: 'No matching transition for this event' });
-    }
-
-    const targetState = machine.definition.states.find(s => s.id === matchedTransition.targetStateId);
-    if (!targetState) return res.status(500).json({ error: 'Target state not found' });
-
     const historyRows = await all(
       'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
       [req.params.id]
@@ -564,22 +551,48 @@ app.post('/api/instances/:id/send', async (req, res) => {
       createdAt: h.created_at
     }));
 
-    const complianceCheck = await checkTransitionCompliance({
+    const traceResult = await buildAndSaveTrace({
       machineId: machine.id,
       machineDefinition: machine.definition,
       instanceId: row.id,
       currentStateId,
-      targetStateId: targetState.id,
-      event,
+      eventName: event,
       payload: payload || {},
+      context,
       history,
-      enteredStateAt: row.entered_state_at || row.created_at
+      enteredStateAt: row.entered_state_at || row.created_at,
+      triggeredBy: 'user'
     });
 
-    if (!complianceCheck.allowed) {
+    if (traceResult.decisionResult === 'rejected_no_match') {
+      return res.status(400).json({
+        error: 'No matching transition for this event',
+        traceId: traceResult.traceId,
+        decisionResult: traceResult.decisionResult,
+        rejectionReason: traceResult.rejectionReason
+      });
+    }
+
+    if (traceResult.decisionResult === 'rejected_compliance') {
       const now = new Date().toISOString();
-      for (const v of complianceCheck.violations) {
-        const alertMsg = {
+      for (const v of traceResult.complianceViolations) {
+        try {
+          await recordViolation({
+            policyId: v.policyId,
+            machineId: machine.id,
+            instanceId: row.id,
+            eventName: event,
+            fromStateId: currentStateId,
+            toStateId: traceResult.targetStateId,
+            reason: v.reason,
+            payloadSnapshot: payload,
+            attemptedAt: now,
+            detectedDuring: 'runtime'
+          });
+        } catch (e) {
+          console.error('[Compliance] Failed to record violation:', e);
+        }
+        broadcastToMachine(machine.id, {
           type: 'compliance_alert',
           machineId: machine.id,
           instanceId: row.id,
@@ -588,19 +601,24 @@ app.post('/api/instances/:id/send', async (req, res) => {
           policyType: v.policyType,
           eventName: event,
           fromStateId: currentStateId,
-          toStateId: targetState.id,
+          toStateId: traceResult.targetStateId,
           reason: v.reason,
           attemptedAt: now,
-          currentStateId: currentStateId
-        };
-        broadcastToMachine(machine.id, alertMsg);
+          currentStateId
+        });
       }
 
       return res.status(403).json({
         error: 'Compliance check failed, transition blocked',
-        complianceViolations: complianceCheck.violations
+        complianceViolations: traceResult.complianceViolations,
+        traceId: traceResult.traceId,
+        decisionResult: traceResult.decisionResult,
+        rejectionReason: traceResult.rejectionReason
       });
     }
+
+    const targetState = machine.definition.states.find(s => s.id === traceResult.targetStateId);
+    if (!targetState) return res.status(500).json({ error: 'Target state not found' });
 
     const transitionId = uuidv4();
     const now = new Date().toISOString();
@@ -615,6 +633,8 @@ app.post('/api/instances/:id/send', async (req, res) => {
       'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [transitionId, row.id, currentStateId, targetState.id, event, JSON.stringify(payload || {}), now, 'user']
     );
+
+    await linkTraceToTransition(traceResult.traceId, transitionId);
 
     await recordStateDuration(row.id, row.machine_id, currentStateId, row.entered_state_at || row.created_at, now);
     if (targetState.isFinal) {
@@ -646,7 +666,8 @@ app.post('/api/instances/:id/send', async (req, res) => {
       event,
       timestamp: now,
       isFinal: !!isFinal,
-      triggeredBy: 'user'
+      triggeredBy: 'user',
+      traceId: traceResult.traceId
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1936,12 +1957,437 @@ app.get('/api/batch/operations/:id', async (req, res) => {
   }
 });
 
+app.get('/api/traces', async (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.instanceId) filters.instanceId = req.query.instanceId;
+    if (req.query.machineId) filters.machineId = req.query.machineId;
+    if (req.query.startTime) filters.startTime = req.query.startTime;
+    if (req.query.endTime) filters.endTime = req.query.endTime;
+    if (req.query.rejected !== undefined) filters.rejected = req.query.rejected;
+    if (req.query.decisionResult) filters.decisionResult = req.query.decisionResult;
+    if (req.query.limit) filters.limit = parseInt(req.query.limit, 10);
+    if (req.query.offset) filters.offset = parseInt(req.query.offset, 10);
+
+    const traces = await queryTraces(filters);
+    const total = await countTraces(filters);
+
+    res.json({
+      total,
+      limit: filters.limit || 50,
+      offset: filters.offset || 0,
+      traces
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/traces/:id', async (req, res) => {
+  try {
+    const trace = await getTraceById(req.params.id);
+    if (!trace) return res.status(404).json({ error: 'Trace not found' });
+    res.json(trace);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/instances/:id/traces', async (req, res) => {
+  try {
+    const row = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Instance not found' });
+
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 50;
+    const offset = req.query.offset ? parseInt(req.query.offset, 10) : 0;
+
+    const traces = await getTracesByInstanceId(req.params.id, { limit, offset });
+    const total = await countTraces({ instanceId: req.params.id });
+
+    res.json({
+      instanceId: req.params.id,
+      total,
+      limit,
+      offset,
+      traces
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+async function seedDemoTraces() {
+  const traceCount = await get('SELECT COUNT(*) as cnt FROM decision_traces');
+  if (traceCount.cnt > 0) {
+    console.log('[DecisionTrace] Demo traces already exist, skipping.');
+    return;
+  }
+
+  const orderMachineRow = await get('SELECT * FROM machines WHERE name = ? ORDER BY version DESC LIMIT 1', ['订单审批']);
+  if (!orderMachineRow) {
+    console.log('[DecisionTrace] No 订单审批 machine found, skipping demo traces.');
+    return;
+  }
+
+  const machine = {
+    id: orderMachineRow.id,
+    definition: JSON.parse(orderMachineRow.definition)
+  };
+
+  const stateMap = new Map();
+  for (const s of machine.definition.states) {
+    stateMap.set(s.name, s);
+    stateMap.set(s.id, s);
+  }
+
+  const instanceRows = await all(
+    'SELECT * FROM instances WHERE machine_id = ? ORDER BY created_at ASC LIMIT 10',
+    [machine.id]
+  );
+
+  if (instanceRows.length === 0) return;
+
+  const policies = await getPoliciesByMachineId(machine.id);
+  const policyIdMap = {};
+  for (const p of policies) {
+    policyIdMap[p.name] = p;
+  }
+
+  const traceIdFn = uuidv4;
+
+  for (const inst of instanceRows) {
+    const transRows = await all(
+      'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
+      [inst.id]
+    );
+
+    for (const tr of transRows) {
+      const fromState = stateMap.get(tr.from_state_id);
+      const toState = stateMap.get(tr.to_state_id);
+      const fromStateName = fromState ? fromState.name : tr.from_state_id;
+      const toStateName = toState ? toState.name : tr.to_state_id;
+
+      const outgoing = machine.definition.transitions.filter(
+        t => t.sourceStateId === tr.from_state_id && t.event === tr.event_name
+      );
+
+      const payload = tr.payload_snapshot ? JSON.parse(tr.payload_snapshot) : {};
+      const candidates = [];
+
+      for (const t of outgoing) {
+        const tgtState = stateMap.get(t.target_state_id);
+        const tgtName = tgtState ? tgtState.name : t.target_state_id;
+        const guardExpr = t.guard || '';
+        let guardResult = false;
+        let guardInput = null;
+
+        if (!guardExpr.trim()) {
+          guardResult = true;
+        } else {
+          guardInput = { payload, context: {} };
+          try {
+            guardResult = evaluateGuard(guardExpr, payload, {});
+          } catch (e) {
+            guardResult = false;
+          }
+        }
+
+        const isSelected = t.targetStateId === tr.to_state_id;
+        candidates.push({
+          transitionId: t.id,
+          targetStateId: t.targetStateId,
+          targetStateName: tgtName,
+          guardExpression: guardExpr || '(无守卫)',
+          guardInput,
+          guardResult,
+          guardError: null,
+          guardDurationMs: Math.floor(Math.random() * 3) + 1,
+          passed: guardResult,
+          selected: isSelected
+        });
+      }
+
+      const phases = [
+        {
+          phase: 'candidate_matching',
+          durationMs: Math.floor(Math.random() * 5) + 2,
+          fromStateId: tr.from_state_id,
+          fromStateName,
+          eventName: tr.event_name,
+          candidateCount: outgoing.length,
+          candidates
+        }
+      ];
+
+      const matchedCandidate = candidates.find(c => c.selected);
+      if (matchedCandidate) {
+        const policyResults = policies.map(p => ({
+          policyId: p.id,
+          policyName: p.name,
+          policyType: p.type,
+          enabled: true,
+          result: 'pass',
+          reason: null,
+          detail: null,
+          triggeredCondition: (p.type === 'mandatory_dwell')
+            ? `在状态 [${p.config.stateName}] 停留不足 ${p.config.minSeconds} 秒时触发`
+            : (p.type === 'event_rate_limit')
+              ? `事件 [${p.config.eventName}] 在 ${p.config.windowSeconds} 秒内超过 ${p.config.maxCount} 次时触发`
+              : null,
+          durationMs: Math.floor(Math.random() * 4) + 1
+        }));
+
+        phases.push({
+          phase: 'compliance_check',
+          durationMs: Math.floor(Math.random() * 8) + 3,
+          transitionId: matchedCandidate.transitionId,
+          targetStateId: matchedCandidate.targetStateId,
+          targetStateName: matchedCandidate.targetStateName,
+          allowed: true,
+          policyCount: policies.length,
+          policies: policyResults
+        });
+      }
+
+      const totalDurationMs = phases.reduce((s, p) => s + p.durationMs, 0);
+
+      const decisionTree = {
+        eventName: tr.event_name,
+        fromStateId: tr.from_state_id,
+        fromStateName,
+        targetStateId: tr.to_state_id,
+        targetStateName: toStateName,
+        triggeredBy: tr.triggered_by || 'user',
+        phases,
+        summary: {
+          candidateCount: outgoing.length,
+          guardPassCount: candidates.filter(c => c.passed).length,
+          complianceChecked: !!matchedCandidate,
+          compliancePass: true,
+          complianceViolationCount: 0
+        }
+      };
+
+      await saveTrace({
+        id: traceIdFn(),
+        instanceId: inst.id,
+        machineId: machine.id,
+        transitionId: tr.id,
+        eventName: tr.event_name,
+        fromStateId: tr.from_state_id,
+        targetStateId: tr.to_state_id,
+        decisionResult: 'accepted',
+        rejectionReason: null,
+        decisionTree,
+        totalDurationMs,
+        createdAt: tr.created_at
+      });
+    }
+  }
+
+  const demoInstance = instanceRows[1] || instanceRows[0];
+  const demoTransRows = await all(
+    'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
+    [demoInstance.id]
+  );
+  const submitTr = demoTransRows.find(t => t.event_name === 'submit');
+  const approveTr = demoTransRows.find(t => t.event_name === 'approve');
+
+  if (approveTr) {
+    const fromState = stateMap.get(approveTr.from_state_id);
+    const fromStateName = fromState ? fromState.name : approveTr.from_state_id;
+    const payload = { amount: 3000, approvedBy: 'manager_x' };
+
+    const outgoing = machine.definition.transitions.filter(
+      t => t.sourceStateId === approveTr.from_state_id && t.event === 'approve'
+    );
+
+    const candidates = outgoing.map(t => {
+      const tgtState = stateMap.get(t.targetStateId);
+      const tgtName = tgtState ? tgtState.name : (t.targetStateId);
+      const guardExpr = t.guard || '';
+      let guardResult = false;
+      let guardInput = null;
+      if (!guardExpr.trim()) {
+        guardResult = true;
+      } else {
+        guardInput = { payload, context: {} };
+        try {
+          guardResult = evaluateGuard(guardExpr, payload, {});
+        } catch (e) {
+          guardResult = false;
+        }
+      }
+      return {
+        transitionId: t.id,
+        targetStateId: t.targetStateId,
+        targetStateName: tgtName,
+        guardExpression: guardExpr || '(无守卫)',
+        guardInput,
+        guardResult,
+        guardError: null,
+        guardDurationMs: Math.floor(Math.random() * 3) + 1,
+        passed: guardResult,
+        selected: false
+      };
+    });
+
+    const matchedCandidate = candidates.find(c => c.passed);
+    if (matchedCandidate) {
+      matchedCandidate.selected = true;
+    }
+
+    const mandatoryDwellPolicy = policyIdMap['待审批最短停留5秒'];
+    const rateLimitPolicy = policyIdMap['approve事件10秒内最多2次'];
+
+    const compliancePolicies = [];
+    if (mandatoryDwellPolicy) {
+      compliancePolicies.push({
+        policyId: mandatoryDwellPolicy.id,
+        policyName: mandatoryDwellPolicy.name,
+        policyType: mandatoryDwellPolicy.type,
+        enabled: true,
+        result: 'violation',
+        reason: `状态 [待审批] 最短停留 5s, 当前仅停留 1.2s (还需 3.8s)`,
+        detail: { stateName: '待审批', minSeconds: 5, elapsedSeconds: 1.2, remaining: 3.8 },
+        triggeredCondition: '在状态 [待审批] 停留不足 5 秒时触发',
+        durationMs: Math.floor(Math.random() * 4) + 1
+      });
+    }
+    if (rateLimitPolicy) {
+      compliancePolicies.push({
+        policyId: rateLimitPolicy.id,
+        policyName: rateLimitPolicy.name,
+        policyType: rateLimitPolicy.type,
+        enabled: true,
+        result: 'pass',
+        reason: null,
+        detail: null,
+        triggeredCondition: '事件 [approve] 在 10 秒内超过 2 次时触发',
+        durationMs: Math.floor(Math.random() * 3) + 1
+      });
+    }
+
+    const violationDescs = compliancePolicies
+      .filter(p => p.result === 'violation')
+      .map(v => `[${v.policyName}] ${v.reason}`);
+
+    const totalDurationMs = 15;
+
+    const decisionTree = {
+      eventName: 'approve',
+      fromStateId: approveTr.from_state_id,
+      fromStateName,
+      targetStateId: matchedCandidate ? matchedCandidate.targetStateId : null,
+      targetStateName: matchedCandidate ? matchedCandidate.targetStateName : null,
+      triggeredBy: 'user',
+      phases: [
+        {
+          phase: 'candidate_matching',
+          durationMs: 5,
+          fromStateId: approveTr.from_state_id,
+          fromStateName,
+          eventName: 'approve',
+          candidateCount: outgoing.length,
+          candidates
+        },
+        {
+          phase: 'compliance_check',
+          durationMs: 10,
+          transitionId: matchedCandidate ? matchedCandidate.transitionId : null,
+          targetStateId: matchedCandidate ? matchedCandidate.targetStateId : null,
+          targetStateName: matchedCandidate ? matchedCandidate.targetStateName : null,
+          allowed: false,
+          policyCount: policies.length,
+          policies: compliancePolicies
+        }
+      ],
+      summary: {
+        candidateCount: outgoing.length,
+        guardPassCount: candidates.filter(c => c.passed).length,
+        complianceChecked: true,
+        compliancePass: false,
+        complianceViolationCount: compliancePolicies.filter(p => p.result === 'violation').length
+      }
+    };
+
+    const complianceTraceTime = new Date(new Date(approveTr.created_at).getTime() - 1000).toISOString();
+
+    await saveTrace({
+      id: traceIdFn(),
+      instanceId: demoInstance.id,
+      machineId: machine.id,
+      transitionId: null,
+      eventName: 'approve',
+      fromStateId: approveTr.from_state_id,
+      targetStateId: null,
+      decisionResult: 'rejected_compliance',
+      rejectionReason: `合规引擎拦截: ${violationDescs.join('; ')}`,
+      decisionTree,
+      totalDurationMs,
+      createdAt: complianceTraceTime
+    });
+  }
+
+  if (submitTr && approveTr) {
+    const rejectEventTime = new Date(new Date(submitTr.created_at).getTime() + 500).toISOString();
+    const fromState = stateMap.get(submitTr.to_state_id);
+    const fromStateName = fromState ? fromState.name : submitTr.to_state_id;
+
+    const decisionTree = {
+      eventName: 'cancel',
+      fromStateId: submitTr.to_state_id,
+      fromStateName,
+      targetStateId: null,
+      targetStateName: null,
+      triggeredBy: 'user',
+      phases: [
+        {
+          phase: 'candidate_matching',
+          durationMs: 1,
+          fromStateId: submitTr.to_state_id,
+          fromStateName,
+          eventName: 'cancel',
+          candidateCount: 0,
+          candidates: []
+        }
+      ],
+      summary: {
+        candidateCount: 0,
+        guardPassCount: 0,
+        complianceChecked: false,
+        compliancePass: true,
+        complianceViolationCount: 0
+      }
+    };
+
+    await saveTrace({
+      id: traceIdFn(),
+      instanceId: demoInstance.id,
+      machineId: machine.id,
+      transitionId: null,
+      eventName: 'cancel',
+      fromStateId: submitTr.to_state_id,
+      targetStateId: null,
+      decisionResult: 'rejected_no_match',
+      rejectionReason: `当前状态 [${fromStateName}] 不存在事件 [cancel] 的候选转换`,
+      decisionTree,
+      totalDurationMs: 1,
+      createdAt: rejectEventTime
+    });
+  }
+
+  console.log('[DecisionTrace] Demo traces seeded successfully.');
+}
+
 async function start() {
   try {
     await initDB();
     await initTakeoverDB();
     await initAnalysisDB();
+    await initTraceDB();
     await seedDemoData();
+    await seedDemoTraces();
     await rebuildAllTimers();
 
     const orderMachineRow = await get('SELECT * FROM machines WHERE name = ? ORDER BY version DESC LIMIT 1', ['订单审批']);

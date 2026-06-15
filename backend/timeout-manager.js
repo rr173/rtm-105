@@ -1,9 +1,8 @@
 const { all, get, run } = require('./db');
 const { v4: uuidv4 } = require('uuid');
-const { evaluateGuard } = require('./guard');
 const { recordStateDuration } = require('./metrics');
-const { checkTransitionCompliance } = require('./compliance-engine');
 const { isInstanceFrozen } = require('./takeover-engine');
+const { buildAndSaveTrace, linkTraceToTransition } = require('./decision-trace');
 
 const activeTimers = new Map();
 
@@ -70,34 +69,6 @@ async function sendTimeoutEvent(instanceId, timeoutConfig) {
     return;
   }
 
-  const outgoing = definition.transitions.filter(
-    t => t.sourceStateId === currentStateId && t.event === event
-  );
-
-  let matchedTransition = null;
-  for (const t of outgoing) {
-    try {
-      if (evaluateGuard(t.guard, payload || {}, context)) {
-        matchedTransition = t;
-        break;
-      }
-    } catch (e) {
-      console.error('Guard evaluation error during timeout:', e);
-    }
-  }
-
-  if (!matchedTransition) {
-    console.log(`[Timeout] No matching transition for event ${event} on instance ${instanceId}, state unchanged`);
-    clearInstanceTimeout(instanceId);
-    return;
-  }
-
-  const targetState = definition.states.find(s => s.id === matchedTransition.targetStateId);
-  if (!targetState) {
-    console.error(`[Timeout] Target state ${matchedTransition.targetStateId} not found`);
-    return;
-  }
-
   const histRows = await all(
     'SELECT * FROM transitions WHERE instance_id = ? ORDER BY created_at ASC',
     [instanceId]
@@ -111,21 +82,34 @@ async function sendTimeoutEvent(instanceId, timeoutConfig) {
     createdAt: h.created_at
   }));
 
-  const complianceCheck = await checkTransitionCompliance({
+  const traceResult = await buildAndSaveTrace({
     machineId: row.machine_id,
     machineDefinition: definition,
     instanceId,
     currentStateId,
-    targetStateId: targetState.id,
-    event,
+    eventName: event,
     payload: payload || {},
+    context,
     history,
-    enteredStateAt: row.entered_state_at || row.created_at
+    enteredStateAt: row.entered_state_at || row.created_at,
+    triggeredBy: 'timeout'
   });
 
-  if (!complianceCheck.allowed) {
-    console.log(`[Timeout] Compliance check blocked transition for instance ${instanceId} via event ${event}: ${JSON.stringify(complianceCheck.violations)}`);
+  if (traceResult.decisionResult === 'rejected_no_match') {
+    console.log(`[Timeout] No matching transition for event ${event} on instance ${instanceId}, state unchanged`);
     clearInstanceTimeout(instanceId);
+    return;
+  }
+
+  if (traceResult.decisionResult === 'rejected_compliance') {
+    console.log(`[Timeout] Compliance check blocked transition for instance ${instanceId} via event ${event}: ${traceResult.rejectionReason}`);
+    clearInstanceTimeout(instanceId);
+    return;
+  }
+
+  const targetState = definition.states.find(s => s.id === traceResult.targetStateId);
+  if (!targetState) {
+    console.error(`[Timeout] Target state ${traceResult.targetStateId} not found`);
     return;
   }
 
@@ -142,6 +126,8 @@ async function sendTimeoutEvent(instanceId, timeoutConfig) {
     'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     [transitionId, row.id, currentStateId, targetState.id, event, JSON.stringify(payload || {}), now, 'timeout']
   );
+
+  await linkTraceToTransition(traceResult.traceId, transitionId);
 
   await recordStateDuration(row.id, row.machine_id, currentStateId, row.entered_state_at || row.created_at, now);
   if (targetState.isFinal) {
