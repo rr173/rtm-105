@@ -58,6 +58,66 @@ async function migrateDB() {
     await run('ALTER TABLE transitions ADD COLUMN triggered_by TEXT NOT NULL DEFAULT "user"');
     console.log('Migrated: added transitions.triggered_by');
   }
+
+  const hasTagsTable = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name='instance_tags'`);
+  if (!hasTagsTable) {
+    await run(`
+      CREATE TABLE instance_tags (
+        id TEXT PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (instance_id) REFERENCES instances(id)
+      )
+    `);
+    await run('CREATE INDEX idx_instance_tags_instance ON instance_tags(instance_id)');
+    await run('CREATE INDEX idx_instance_tags_tag ON instance_tags(tag)');
+    await run('CREATE UNIQUE INDEX idx_instance_tags_unique ON instance_tags(instance_id, tag)');
+    console.log('Migrated: created instance_tags table');
+  }
+
+  const hasBatchOpsTable = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name='batch_operations'`);
+  if (!hasBatchOpsTable) {
+    await run(`
+      CREATE TABLE batch_operations (
+        id TEXT PRIMARY KEY,
+        operation_type TEXT NOT NULL,
+        target_tags_json TEXT NOT NULL,
+        event_name TEXT,
+        event_payload TEXT,
+        operator_id TEXT NOT NULL,
+        operator_name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        total_count INTEGER NOT NULL DEFAULT 0,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        skipped_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'running'
+      )
+    `);
+    await run('CREATE INDEX idx_batch_operations_created ON batch_operations(created_at)');
+    await run('CREATE INDEX idx_batch_operations_type ON batch_operations(operation_type)');
+    console.log('Migrated: created batch_operations table');
+  }
+
+  const hasBatchResultsTable = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name='batch_operation_results'`);
+  if (!hasBatchResultsTable) {
+    await run(`
+      CREATE TABLE batch_operation_results (
+        id TEXT PRIMARY KEY,
+        batch_operation_id TEXT NOT NULL,
+        instance_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_message TEXT,
+        executed_at TEXT NOT NULL,
+        FOREIGN KEY (batch_operation_id) REFERENCES batch_operations(id),
+        FOREIGN KEY (instance_id) REFERENCES instances(id)
+      )
+    `);
+    await run('CREATE INDEX idx_batch_results_batch ON batch_operation_results(batch_operation_id)');
+    await run('CREATE INDEX idx_batch_results_instance ON batch_operation_results(instance_id)');
+    console.log('Migrated: created batch_operation_results table');
+  }
 }
 
 function initDB() {
@@ -241,14 +301,54 @@ function initDB() {
         CREATE INDEX IF NOT EXISTS idx_simulation_branches_parent ON simulation_branches(parent_branch_id);
         CREATE INDEX IF NOT EXISTS idx_simulation_steps_branch ON simulation_steps(branch_id);
         CREATE INDEX IF NOT EXISTS idx_simulation_steps_branch_index ON simulation_steps(branch_id, step_index);
-      `, async (err) => {
+
+        CREATE TABLE IF NOT EXISTS instance_tags (
+          id TEXT PRIMARY KEY,
+          instance_id TEXT NOT NULL,
+          tag TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (instance_id) REFERENCES instances(id)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_instance_tags_unique ON instance_tags(instance_id, tag);
+        CREATE INDEX IF NOT EXISTS idx_instance_tags_instance ON instance_tags(instance_id);
+        CREATE INDEX IF NOT EXISTS idx_instance_tags_tag ON instance_tags(tag);
+
+        CREATE TABLE IF NOT EXISTS batch_operations (
+          id TEXT PRIMARY KEY,
+          operation_type TEXT NOT NULL,
+          target_tags_json TEXT NOT NULL,
+          event_name TEXT,
+          event_payload TEXT,
+          operator_id TEXT NOT NULL,
+          operator_name TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          total_count INTEGER NOT NULL DEFAULT 0,
+          success_count INTEGER NOT NULL DEFAULT 0,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          skipped_count INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'running'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_batch_operations_created ON batch_operations(created_at);
+        CREATE INDEX IF NOT EXISTS idx_batch_operations_type ON batch_operations(operation_type);
+
+        CREATE TABLE IF NOT EXISTS batch_operation_results (
+          id TEXT PRIMARY KEY,
+          batch_operation_id TEXT NOT NULL,
+          instance_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          result_message TEXT,
+          executed_at TEXT NOT NULL,
+          FOREIGN KEY (batch_operation_id) REFERENCES batch_operations(id),
+          FOREIGN KEY (instance_id) REFERENCES instances(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_batch_results_batch ON batch_operation_results(batch_operation_id);
+        CREATE INDEX IF NOT EXISTS idx_batch_results_instance ON batch_operation_results(instance_id);
+      `, (err) => {
         if (err) return reject(err);
-        try {
-          await migrateDB();
-          resolve();
-        } catch (mErr) {
-          reject(mErr);
-        }
+        migrateDB().then(resolve).catch(reject);
       });
     });
   });

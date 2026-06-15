@@ -87,6 +87,17 @@ const {
   getLatestAnalysisReport,
   runAnalysisForMachine
 } = require('./static-analysis');
+const {
+  OPERATION_TYPE,
+  addTagsToInstance,
+  removeTagsFromInstance,
+  getInstanceTags,
+  getAllTags,
+  findInstancesByTags,
+  executeBatchOperation,
+  listBatchOperations,
+  getBatchOperationDetail
+} = require('./batch-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -278,6 +289,7 @@ app.get('/api/machines/:machineId/instances', async (req, res) => {
       const freezeInfo = await getFreezeInfo(row.id);
       const activeTakeover = await getActiveTakeoverSession(row.id);
       const pendingEvents = await getPendingEvents(row.id);
+      const tags = await getInstanceTags(row.id);
       return {
         id: row.id,
         machineId: row.machine_id,
@@ -290,7 +302,8 @@ app.get('/api/machines/:machineId/instances', async (req, res) => {
         isFrozen: freezeInfo ? freezeInfo.isFrozen : false,
         freezeInfo,
         activeTakeover,
-        pendingEventCount: pendingEvents.length
+        pendingEventCount: pendingEvents.length,
+        tags
       };
     }));
 
@@ -1770,6 +1783,154 @@ app.get('/api/analysis/:reportId', async (req, res) => {
     const report = await getAnalysisReportById(req.params.reportId);
     if (!report) return res.status(404).json({ error: 'Analysis report not found' });
     res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/tags', async (req, res) => {
+  try {
+    const tags = await getAllTags(req.params.machineId);
+    res.json(tags);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/instances/:id/tags', async (req, res) => {
+  try {
+    const tags = await getInstanceTags(req.params.id);
+    res.json(tags);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/instances/:id/tags', async (req, res) => {
+  try {
+    const { tags } = req.body;
+    if (!Array.isArray(tags)) {
+      return res.status(400).json({ error: 'tags must be an array' });
+    }
+    const result = await addTagsToInstance(req.params.id, tags);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/instances/:id/tags', async (req, res) => {
+  try {
+    const { tags } = req.body;
+    if (!Array.isArray(tags)) {
+      return res.status(400).json({ error: 'tags must be an array' });
+    }
+    const result = await removeTagsFromInstance(req.params.id, tags);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/instances/by-tags', async (req, res) => {
+  try {
+    const { tags } = req.query;
+    if (!tags) {
+      return res.status(400).json({ error: 'tags query parameter is required' });
+    }
+    const tagArray = Array.isArray(tags) ? tags : tags.split(',').filter(t => t.trim());
+    const rows = await findInstancesByTags(tagArray, req.params.machineId);
+
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    const instances = await Promise.all(rows.map(async row => {
+      const freezeInfo = await getFreezeInfo(row.id);
+      const activeTakeover = await getActiveTakeoverSession(row.id);
+      const pendingEvents = await getPendingEvents(row.id);
+      const instanceTags = await getInstanceTags(row.id);
+      return {
+        id: row.id,
+        machineId: row.machine_id,
+        machineVersion: machine.version,
+        currentStateId: row.current_state_id,
+        context: JSON.parse(row.context_data),
+        createdAt: row.created_at,
+        isFinal: !!row.is_final,
+        timeoutInfo: buildTimeoutInfo(row.id, machine.definition, row.current_state_id, row.entered_state_at),
+        isFrozen: freezeInfo ? freezeInfo.isFrozen : false,
+        freezeInfo,
+        activeTakeover,
+        pendingEventCount: pendingEvents.length,
+        tags: instanceTags
+      };
+    }));
+
+    res.json(instances);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/batch/execute', async (req, res) => {
+  try {
+    const { operationType, targetTags, eventName, eventPayload, operatorId, operatorName, machineId } = req.body;
+
+    if (!operationType) {
+      return res.status(400).json({ error: 'operationType is required' });
+    }
+    if (!Array.isArray(targetTags) || targetTags.length === 0) {
+      return res.status(400).json({ error: 'targetTags must be a non-empty array' });
+    }
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ error: 'operatorId and operatorName are required' });
+    }
+    if (operationType === OPERATION_TYPE.SEND_EVENT && !eventName) {
+      return res.status(400).json({ error: 'eventName is required for send_event operation' });
+    }
+
+    const result = await executeBatchOperation({
+      operationType,
+      targetTags,
+      eventName,
+      eventPayload,
+      operatorId,
+      operatorName,
+      machineId
+    });
+
+    if (!result.success && result.success === false) {
+      return res.status(400).json(result);
+    }
+
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/batch/operations', async (req, res) => {
+  try {
+    const { machineId, limit, offset } = req.query;
+    const options = {};
+    if (machineId) options.machineId = machineId;
+    if (limit) options.limit = parseInt(limit, 10);
+    if (offset) options.offset = parseInt(offset, 10);
+
+    const operations = await listBatchOperations(options);
+    res.json(operations);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/batch/operations/:id', async (req, res) => {
+  try {
+    const detail = await getBatchOperationDetail(req.params.id);
+    if (!detail) {
+      return res.status(404).json({ error: 'Batch operation not found' });
+    }
+    res.json(detail);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

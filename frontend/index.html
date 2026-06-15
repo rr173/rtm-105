@@ -15,6 +15,7 @@
       <button id="btn-open-market" class="btn">📦 模板市场</button>
       <button id="btn-open-simulation" class="btn" style="background: #722ed1;">🔬 推演实验室</button>
       <button id="btn-open-takeover" class="btn" style="background: #d4380d;">🚨 人工接管工作台</button>
+      <button id="btn-open-batch" class="btn" style="background: #1890ff;">🏷️ 标签与批量操作</button>
     </div>
   </header>
 
@@ -38,6 +39,14 @@
           </div>
           <div id="instance-list"></div>
           <div id="instance-detail"></div>
+          <div id="instance-tags" style="display:none; margin-top:15px;">
+            <h4 style="margin-bottom:8px;">🏷️ 实例标签</h4>
+            <div id="instance-tags-list" class="instance-tags-list"></div>
+            <div style="margin-top:8px; display:flex; gap:4px;">
+              <input type="text" id="new-tag-input" placeholder="输入标签名" style="flex:1; padding:4px 8px; font-size:12px;">
+              <button id="btn-add-tag" class="btn btn-sm">添加</button>
+            </div>
+          </div>
         </div>
         <div id="no-instance-hint">请选择右侧已发布的状态机查看实例</div>
       </div>
@@ -619,6 +628,156 @@
         <div class="migration-actions">
           <button id="tk-confirm-cancel" class="btn">取消</button>
           <button id="tk-confirm-ok" class="btn btn-danger">确认执行</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="batch-modal" class="modal-overlay" style="display:none; z-index: 9998;">
+    <div class="modal" style="max-width: 1200px; width: 95vw; max-height: 90vh;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);">
+        <h2>🏷️ 标签管理与批量操作</h2>
+        <button id="btn-close-batch" class="modal-close">&times;</button>
+      </div>
+
+      <div id="batch-main" class="batch-main">
+        <div class="batch-toolbar">
+          <div class="batch-tabs">
+            <button class="batch-tab-btn active" data-tab="tag-filter">标签筛选</button>
+            <button class="batch-tab-btn" data-tab="batch-operations">批量操作</button>
+            <button class="batch-tab-btn" data-tab="operation-history">操作记录</button>
+          </div>
+          <div class="batch-machine-select">
+            <label>选择状态机：</label>
+            <select id="batch-machine-select" class="form-control" style="min-width:200px;">
+              <option value="">-- 请选择状态机 --</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="batch-tab-tag-filter" class="batch-tab-content">
+          <div class="filter-section">
+            <h4>🏷️ 选择标签（多标签交集筛选）</h4>
+            <div id="available-tags" class="tag-cloud"></div>
+            <div class="selected-tags-info">
+              <span>已选标签：</span>
+              <div id="selected-tags-display" class="selected-tags"></div>
+              <button id="btn-clear-tags" class="btn btn-sm" style="margin-left:8px;">清空选择</button>
+            </div>
+          </div>
+          <div class="instances-preview-section">
+            <div class="section-header">
+              <h4>📋 匹配的实例列表</h4>
+              <span id="matched-instances-count" class="badge badge-info">0 个实例</span>
+            </div>
+            <div id="matched-instances-list" class="matched-instances-list"></div>
+          </div>
+        </div>
+
+        <div id="batch-tab-batch-operations" class="batch-tab-content" style="display:none;">
+          <div class="operation-section">
+            <h4>🎯 选择操作类型</h4>
+            <div class="operation-type-options">
+              <label class="operation-type-option">
+                <input type="radio" name="batchOperationType" value="send_event" checked>
+                <span>📤 批量发送事件</span>
+              </label>
+              <label class="operation-type-option">
+                <input type="radio" name="batchOperationType" value="freeze">
+                <span>❄️ 批量冻结</span>
+              </label>
+              <label class="operation-type-option">
+                <input type="radio" name="batchOperationType" value="unfreeze">
+                <span>☀️ 批量解冻</span>
+              </label>
+            </div>
+          </div>
+
+          <div id="send-event-options" class="operation-options">
+            <div class="form-group">
+              <label>事件名称 <span style="color:#ff4d4f;">*</span></label>
+              <input type="text" id="batch-event-name" class="form-control" placeholder="输入事件名称，如 approve">
+            </div>
+            <div class="form-group">
+              <label>事件 Payload (JSON)</label>
+              <textarea id="batch-event-payload" class="form-control" rows="3" placeholder='{"amount": 100, "reason": "approved"}'></textarea>
+            </div>
+          </div>
+
+          <div class="target-tags-section">
+            <h4>🎯 目标标签</h4>
+            <div id="batch-target-tags" class="tag-cloud"></div>
+            <div class="selected-tags-info">
+              <span>已选目标标签：</span>
+              <div id="batch-selected-tags" class="selected-tags"></div>
+            </div>
+          </div>
+
+          <div class="operator-section">
+            <div class="form-group">
+              <label>操作人姓名 <span style="color:#ff4d4f;">*</span></label>
+              <input type="text" id="batch-operator-name" class="form-control" placeholder="请输入您的姓名">
+            </div>
+          </div>
+
+          <div class="batch-execute-section">
+            <button id="btn-execute-batch" class="btn btn-primary btn-lg" style="padding:12px 40px;">🚀 执行批量操作</button>
+          </div>
+        </div>
+
+        <div id="batch-tab-operation-history" class="batch-tab-content" style="display:none;">
+          <div class="history-list-section">
+            <div class="section-header">
+              <h4>📜 批量操作历史记录</h4>
+              <button id="btn-refresh-history" class="btn btn-sm">🔄 刷新</button>
+            </div>
+            <div id="batch-history-list" class="batch-history-list"></div>
+          </div>
+          <div id="batch-history-detail" class="history-detail-section" style="display:none;">
+            <div class="section-header">
+              <button id="btn-back-to-history-list" class="btn btn-sm">&larr; 返回列表</button>
+              <h4>📋 操作详情</h4>
+            </div>
+            <div id="history-detail-content"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="batch-execute-modal" class="modal-overlay" style="display:none; z-index: 10002;">
+    <div class="modal" style="max-width: 700px;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);">
+        <h3>🚀 执行批量操作</h3>
+        <button id="btn-close-batch-execute" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="batch-progress-section">
+          <div class="progress-bar">
+            <div class="progress-fill" id="batch-progress-fill" style="width: 0%"></div>
+          </div>
+          <div class="progress-text" id="batch-progress-text">准备执行...</div>
+        </div>
+        <div class="batch-summary">
+          <div class="summary-card summary-success">
+            <div class="summary-count" id="batch-success-count">0</div>
+            <div class="summary-label">成功</div>
+          </div>
+          <div class="summary-card summary-danger">
+            <div class="summary-count" id="batch-failed-count">0</div>
+            <div class="summary-label">失败</div>
+          </div>
+          <div class="summary-card summary-info">
+            <div class="summary-count" id="batch-skipped-count">0</div>
+            <div class="summary-label">跳过</div>
+          </div>
+        </div>
+        <div class="batch-result-list">
+          <h4>执行明细</h4>
+          <div id="batch-result-detail" class="execute-results"></div>
+        </div>
+        <div class="migration-actions" style="justify-content:center;">
+          <button id="btn-close-batch-result" class="btn btn-primary" style="display:none;">完成</button>
         </div>
       </div>
     </div>

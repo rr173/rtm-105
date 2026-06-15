@@ -84,7 +84,17 @@ class WorkflowApp {
     this.takeoverRefreshTimer = null;
     this.takeoverCurrentTab = 'inject';
     this.takeoverPreviewResult = null;
-    
+
+    this.batchSelectedTags = new Set();
+    this.batchTargetTags = new Set();
+    this.batchCurrentTab = 'tag-filter';
+    this.batchOperatorId = 'user_' + Math.random().toString(36).slice(2, 10);
+    this.batchOperatorName = localStorage.getItem('batchOperatorName') || '';
+    this.batchAllTags = [];
+    this.batchMatchedInstances = [];
+    this.batchHistoryList = [];
+    this.batchCurrentHistoryDetail = null;
+
     this.init();
   }
   
@@ -141,9 +151,14 @@ class WorkflowApp {
     document.getElementById('btn-create-instance').addEventListener('click', () => this.createInstance());
     document.getElementById('btn-send-event').addEventListener('click', () => this.sendEvent());
     document.getElementById('btn-clear-violations').addEventListener('click', () => this.clearViolations());
+    document.getElementById('btn-add-tag').addEventListener('click', () => this.addTagToInstance());
+    document.getElementById('new-tag-input').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') this.addTagToInstance();
+    });
     this.bindTemplateMarketEvents();
     this.bindMigrationEvents();
     this.bindTakeoverEvents();
+    this.bindBatchEvents();
   }
 
   bindMigrationEvents() {
@@ -881,8 +896,19 @@ class WorkflowApp {
         takeoverBadge = `<span class="badge badge-danger" style="margin-left:4px;">❄️ ${operatorName}</span>`;
       }
       
+      let tagsHtml = '';
+      if (inst.tags && inst.tags.length > 0) {
+        tagsHtml = '<div class="instance-item-tags">' + 
+          inst.tags.slice(0, 3).map(t => `<span class="tag-chip-small">${escapeHtml(t)}</span>`).join('') +
+          (inst.tags.length > 3 ? `<span class="tag-chip-small">+${inst.tags.length - 3}</span>` : '') +
+          '</div>';
+      }
+
       return `<div class="${cls}" data-id="${inst.id}">
-        ${inst.id.slice(0, 8)}… [${stateName}]${versionBadge}${takeoverBadge}
+        <div class="instance-chip-main">
+          ${inst.id.slice(0, 8)}… [${stateName}]${versionBadge}${takeoverBadge}
+        </div>
+        ${tagsHtml}
       </div>`;
     }).join('');
     container.querySelectorAll('.instance-chip').forEach(el => {
@@ -897,6 +923,7 @@ class WorkflowApp {
       const res = await fetch(API_BASE + '/api/instances/' + id);
       const data = await res.json();
       this.renderInstanceDetail(data);
+      this.renderInstanceTags();
     } catch (e) {
       toast('加载实例详情失败', 'error');
     }
@@ -4212,6 +4239,647 @@ class SimulationLab {
       return isoString;
     }
   }
+
+  bindBatchEvents() {
+    document.getElementById('btn-open-batch').addEventListener('click', () => this.openBatchModal());
+    document.getElementById('btn-close-batch').addEventListener('click', () => this.closeBatchModal());
+    document.getElementById('batch-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'batch-modal') this.closeBatchModal();
+    });
+
+    document.querySelectorAll('.batch-tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.switchBatchTab(btn.dataset.tab));
+    });
+
+    document.getElementById('batch-machine-select').addEventListener('change', () => {
+      this.batchSelectedTags.clear();
+      this.batchTargetTags.clear();
+      this.loadBatchTags();
+      this.loadMatchedInstances();
+    });
+
+    document.getElementById('btn-clear-tags').addEventListener('click', () => {
+      this.batchSelectedTags.clear();
+      this.renderAvailableTags();
+      this.loadMatchedInstances();
+    });
+
+    document.querySelectorAll('input[name="batchOperationType"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const sendEventOptions = document.getElementById('send-event-options');
+        sendEventOptions.style.display = radio.value === 'send_event' ? 'block' : 'none';
+      });
+    });
+
+    document.getElementById('btn-execute-batch').addEventListener('click', () => this.executeBatchOperation());
+
+    document.getElementById('btn-refresh-history').addEventListener('click', () => this.loadBatchHistory());
+    document.getElementById('btn-back-to-history-list').addEventListener('click', () => this.showBatchHistoryList());
+
+    document.getElementById('btn-close-batch-execute').addEventListener('click', () => {
+      document.getElementById('batch-execute-modal').style.display = 'none';
+    });
+    document.getElementById('batch-execute-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'batch-execute-modal') {
+        document.getElementById('batch-execute-modal').style.display = 'none';
+      }
+    });
+  }
+
+  openBatchModal() {
+    document.getElementById('batch-modal').style.display = 'flex';
+    this.populateBatchMachineSelect();
+    this.switchBatchTab('tag-filter');
+  }
+
+  closeBatchModal() {
+    document.getElementById('batch-modal').style.display = 'none';
+    this.batchSelectedTags.clear();
+    this.batchTargetTags.clear();
+  }
+
+  populateBatchMachineSelect() {
+    const select = document.getElementById('batch-machine-select');
+    const currentValue = select.value;
+    const options = ['<option value="">-- 请选择状态机 --</option>'];
+    this.machines.forEach(m => {
+      options.push(`<option value="${m.id}">${escapeHtml(m.name)}</option>`);
+    });
+    select.innerHTML = options.join('');
+    if (this.selectedMachine && !currentValue) {
+      select.value = this.selectedMachine;
+    }
+    this.loadBatchTags();
+  }
+
+  switchBatchTab(tabName) {
+    this.batchCurrentTab = tabName;
+    document.querySelectorAll('.batch-tab-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tab === tabName);
+    });
+    document.getElementById('batch-tab-tag-filter').style.display = tabName === 'tag-filter' ? 'block' : 'none';
+    document.getElementById('batch-tab-batch-operations').style.display = tabName === 'batch-operations' ? 'block' : 'none';
+    document.getElementById('batch-tab-operation-history').style.display = tabName === 'operation-history' ? 'block' : 'none';
+
+    if (tabName === 'operation-history') {
+      this.loadBatchHistory();
+    } else if (tabName === 'batch-operations') {
+      this.loadBatchTagsForOperation();
+    }
+  }
+
+  async loadBatchTags() {
+    const machineId = document.getElementById('batch-machine-select').value;
+    if (!machineId) {
+      document.getElementById('available-tags').innerHTML = '<div style="color:#8c8c8c;">请先选择状态机</div>';
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/machines/${machineId}/tags`);
+      this.batchAllTags = await res.json();
+      this.renderAvailableTags();
+      this.renderSelectedTags();
+    } catch (e) {
+      console.error('加载标签失败:', e);
+    }
+  }
+
+  renderAvailableTags() {
+    const container = document.getElementById('available-tags');
+    if (this.batchAllTags.length === 0) {
+      container.innerHTML = '<div style="color:#8c8c8c;">暂无可用标签，请先在左侧实例管理中为实例添加标签</div>';
+      return;
+    }
+
+    container.innerHTML = this.batchAllTags.map(tag => {
+      const selected = this.batchSelectedTags.has(tag);
+      return `
+        <span class="tag-item ${selected ? 'selected' : ''}" data-tag="${escapeHtml(tag)}">
+          ${selected ? '✓ ' : ''}${escapeHtml(tag)}
+        </span>
+      `;
+    }).join('');
+
+    container.querySelectorAll('.tag-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const tag = item.getAttribute('data-tag');
+        if (this.batchSelectedTags.has(tag)) {
+          this.batchSelectedTags.delete(tag);
+        } else {
+          this.batchSelectedTags.add(tag);
+        }
+        this.renderAvailableTags();
+        this.renderSelectedTags();
+        this.loadMatchedInstances();
+      });
+    });
+  }
+
+  renderSelectedTags() {
+    const container = document.getElementById('selected-tags-display');
+    if (this.batchSelectedTags.size === 0) {
+      container.innerHTML = '<span style="color:#8c8c8c;">未选择</span>';
+      return;
+    }
+
+    container.innerHTML = Array.from(this.batchSelectedTags).map(tag => `
+      <span class="tag-chip">
+        ${escapeHtml(tag)}
+        <span class="tag-remove" data-tag="${escapeHtml(tag)}">×</span>
+      </span>
+    `).join('');
+
+    container.querySelectorAll('.tag-remove').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const tag = btn.getAttribute('data-tag');
+        this.batchSelectedTags.delete(tag);
+        this.renderAvailableTags();
+        this.renderSelectedTags();
+        this.loadMatchedInstances();
+      });
+    });
+  }
+
+  async loadMatchedInstances() {
+    const machineId = document.getElementById('batch-machine-select').value;
+    if (!machineId || this.batchSelectedTags.size === 0) {
+      document.getElementById('matched-instances-count').textContent = '0 个实例';
+      document.getElementById('matched-instances-list').innerHTML = '<div style="color:#8c8c8c;padding:20px;text-align:center;">请选择状态机和标签</div>';
+      this.batchMatchedInstances = [];
+      return;
+    }
+
+    try {
+      const tagsParam = Array.from(this.batchSelectedTags).join(',');
+      const res = await fetch(`${API_BASE}/api/machines/${machineId}/instances/by-tags?tags=${encodeURIComponent(tagsParam)}`);
+      this.batchMatchedInstances = await res.json();
+
+      document.getElementById('matched-instances-count').textContent = `${this.batchMatchedInstances.length} 个实例`;
+      this.renderMatchedInstances();
+    } catch (e) {
+      console.error('加载匹配实例失败:', e);
+    }
+  }
+
+  renderMatchedInstances() {
+    const container = document.getElementById('matched-instances-list');
+    if (this.batchMatchedInstances.length === 0) {
+      container.innerHTML = '<div style="color:#8c8c8c;padding:20px;text-align:center;">没有找到匹配的实例</div>';
+      return;
+    }
+
+    const machine = this.machines.find(m => m.id === document.getElementById('batch-machine-select').value);
+    const machineDef = machine ? machine.definition : null;
+
+    container.innerHTML = this.batchMatchedInstances.map(inst => {
+      const state = machineDef ? machineDef.states.find(s => s.id === inst.currentStateId) : null;
+      const stateName = state ? state.name : inst.currentStateId;
+      return `
+        <div class="instance-card">
+          <div class="instance-card-header">
+            <span class="instance-id">${inst.id.slice(0, 12)}...</span>
+            <span class="instance-state ${inst.isFinal ? 'final' : ''}">${escapeHtml(stateName)}</span>
+          </div>
+          <div class="instance-tags">
+            ${inst.tags.map(t => `<span class="tag-chip-small">${escapeHtml(t)}</span>`).join('')}
+          </div>
+          <div class="instance-meta">
+            ${inst.isFrozen ? '<span class="badge badge-warning">❄️ 已冻结</span>' : ''}
+            ${inst.activeTakeover ? '<span class="badge badge-info">🚨 接管中</span>' : ''}
+            ${inst.isFinal ? '<span class="badge badge-success">🏁 已结束</span>' : ''}
+            <span style="color:#8c8c8c;">创建: ${this.formatTime(inst.createdAt)}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  async addTagToInstance() {
+    if (!this.selectedInstance) return;
+    const input = document.getElementById('new-tag-input');
+    const tag = input.value.trim();
+    if (!tag) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/instances/${this.selectedInstance}/tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags: [tag] })
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+
+      input.value = '';
+      toast(`✅ 添加了 ${result.added} 个标签`, 'success');
+      this.renderInstanceTags();
+      this.loadInstances();
+    } catch (e) {
+      toast('添加标签失败: ' + e.message, 'error');
+    }
+  }
+
+  async removeTagFromInstance(tag) {
+    if (!this.selectedInstance) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/instances/${this.selectedInstance}/tags`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags: [tag] })
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+
+      toast(`✅ 移除了 ${result.removed} 个标签`, 'success');
+      this.renderInstanceTags();
+      this.loadInstances();
+    } catch (e) {
+      toast('移除标签失败: ' + e.message, 'error');
+    }
+  }
+
+  async renderInstanceTags() {
+    if (!this.selectedInstance) {
+      document.getElementById('instance-tags').style.display = 'none';
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/instances/${this.selectedInstance}/tags`);
+      const tags = await res.json();
+
+      document.getElementById('instance-tags').style.display = 'block';
+      const container = document.getElementById('instance-tags-list');
+
+      if (tags.length === 0) {
+        container.innerHTML = '<div style="color:#8c8c8c;font-size:12px;">暂无标签</div>';
+      } else {
+        container.innerHTML = tags.map(tag => `
+          <span class="tag-chip">
+            ${escapeHtml(tag)}
+            <span class="tag-remove" data-tag="${escapeHtml(tag)}">×</span>
+          </span>
+        `).join('');
+
+        container.querySelectorAll('.tag-remove').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const tag = btn.getAttribute('data-tag');
+            this.removeTagFromInstance(tag);
+          });
+        });
+      }
+    } catch (e) {
+      console.error('加载标签失败:', e);
+    }
+  }
+
+  loadBatchTagsForOperation() {
+    const machineId = document.getElementById('batch-machine-select').value;
+    if (!machineId) {
+      document.getElementById('batch-target-tags').innerHTML = '<div style="color:#8c8c8c;">请先选择状态机</div>';
+      return;
+    }
+
+    const container = document.getElementById('batch-target-tags');
+    if (this.batchAllTags.length === 0) {
+      container.innerHTML = '<div style="color:#8c8c8c;">暂无可用标签</div>';
+      return;
+    }
+
+    container.innerHTML = this.batchAllTags.map(tag => {
+      const selected = this.batchTargetTags.has(tag);
+      return `
+        <span class="tag-item ${selected ? 'selected' : ''}" data-tag="${escapeHtml(tag)}">
+          ${selected ? '✓ ' : ''}${escapeHtml(tag)}
+        </span>
+      `;
+    }).join('');
+
+    container.querySelectorAll('.tag-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const tag = item.getAttribute('data-tag');
+        if (this.batchTargetTags.has(tag)) {
+          this.batchTargetTags.delete(tag);
+        } else {
+          this.batchTargetTags.add(tag);
+        }
+        this.loadBatchTagsForOperation();
+        this.renderBatchTargetTags();
+      });
+    });
+
+    this.renderBatchTargetTags();
+
+    const operatorInput = document.getElementById('batch-operator-name');
+    if (this.batchOperatorName) {
+      operatorInput.value = this.batchOperatorName;
+    }
+  }
+
+  renderBatchTargetTags() {
+    const container = document.getElementById('batch-selected-tags');
+    if (this.batchTargetTags.size === 0) {
+      container.innerHTML = '<span style="color:#8c8c8c;">未选择</span>';
+      return;
+    }
+
+    container.innerHTML = Array.from(this.batchTargetTags).map(tag => `
+      <span class="tag-chip">
+        ${escapeHtml(tag)}
+        <span class="tag-remove" data-tag="${escapeHtml(tag)}">×</span>
+      </span>
+    `).join('');
+
+    container.querySelectorAll('.tag-remove').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const tag = btn.getAttribute('data-tag');
+        this.batchTargetTags.delete(tag);
+        this.loadBatchTagsForOperation();
+      });
+    });
+  }
+
+  async executeBatchOperation() {
+    const machineId = document.getElementById('batch-machine-select').value;
+    const operationType = document.querySelector('input[name="batchOperationType"]:checked').value;
+    const eventName = document.getElementById('batch-event-name').value.trim();
+    const eventPayloadStr = document.getElementById('batch-event-payload').value.trim();
+    const operatorName = document.getElementById('batch-operator-name').value.trim();
+
+    if (!machineId) {
+      toast('请选择状态机', 'warning');
+      return;
+    }
+    if (this.batchTargetTags.size === 0) {
+      toast('请选择目标标签', 'warning');
+      return;
+    }
+    if (!operatorName) {
+      toast('请输入操作人姓名', 'warning');
+      return;
+    }
+    if (operationType === 'send_event' && !eventName) {
+      toast('请输入事件名称', 'warning');
+      return;
+    }
+
+    let eventPayload = null;
+    if (eventPayloadStr) {
+      try {
+        eventPayload = JSON.parse(eventPayloadStr);
+      } catch (e) {
+        toast('Payload 必须是有效的 JSON', 'warning');
+        return;
+      }
+    }
+
+    this.batchOperatorName = operatorName;
+    localStorage.setItem('batchOperatorName', operatorName);
+
+    const confirmMsg = operationType === 'send_event' 
+      ? `确定要对 ${Array.from(this.batchTargetTags).join('、')} 标签的实例批量发送事件 "${eventName}" 吗？`
+      : operationType === 'freeze'
+      ? `确定要 ${Array.from(this.batchTargetTags).join('、')} 标签的实例批量冻结吗？`
+      : `确定要对 ${Array.from(this.batchTargetTags).join('、')} 标签的实例批量解冻吗？`;
+
+    if (!confirm(confirmMsg)) return;
+
+    document.getElementById('batch-execute-modal').style.display = 'flex';
+    document.getElementById('batch-progress-fill').style.width = '0%';
+    document.getElementById('batch-progress-text').textContent = '准备执行...';
+    document.getElementById('batch-success-count').textContent = '0';
+    document.getElementById('batch-failed-count').textContent = '0';
+    document.getElementById('batch-skipped-count').textContent = '0';
+    document.getElementById('batch-result-detail').innerHTML = '';
+    document.getElementById('btn-close-batch-result').style.display = 'none';
+
+    try {
+      const res = await fetch(`${API_BASE}/api/batch/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operationType,
+          targetTags: Array.from(this.batchTargetTags),
+          eventName: operationType === 'send_event' ? eventName : null,
+          eventPayload,
+          operatorId: this.batchOperatorId,
+          operatorName,
+          machineId
+        })
+      });
+
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+
+      this.renderBatchExecuteResult(result);
+    } catch (e) {
+      document.getElementById('batch-progress-text').textContent = '执行失败: ' + e.message;
+      document.getElementById('btn-close-batch-result').style.display = 'inline-block';
+    }
+  }
+
+  renderBatchExecuteResult(result) {
+    const total = result.total || 0;
+    const successCount = result.successCount || 0;
+    const failedCount = result.failedCount || 0;
+    const skippedCount = result.skippedCount || 0;
+
+    document.getElementById('batch-progress-fill').style.width = '100%';
+    document.getElementById('batch-progress-text').textContent = `执行完成！共 ${total} 个实例`;
+    document.getElementById('batch-success-count').textContent = successCount;
+    document.getElementById('batch-failed-count').textContent = failedCount;
+    document.getElementById('batch-skipped-count').textContent = skippedCount;
+
+    const container = document.getElementById('batch-result-detail');
+    container.innerHTML = (result.results || []).map(r => {
+      let statusClass = '';
+      let statusIcon = '';
+      if (r.status === 'success') {
+        statusClass = 'result-success';
+        statusIcon = '✅';
+      } else if (r.status === 'skipped') {
+        statusClass = 'result-skipped';
+        statusIcon = '⏭️';
+      } else {
+        statusClass = 'result-failed';
+        statusIcon = '❌';
+      }
+
+      return `
+        <div class="execute-result-item ${statusClass}">
+          <span class="result-icon">${statusIcon}</span>
+          <span class="result-instance-id">${r.instanceId.slice(0, 12)}...</span>
+          <span class="result-message">${escapeHtml(r.message)}</span>
+        </div>
+      `;
+    }).join('');
+
+    document.getElementById('btn-close-batch-result').style.display = 'inline-block';
+
+    this.loadInstances();
+  }
+
+  async loadBatchHistory() {
+    const machineId = document.getElementById('batch-machine-select').value;
+    let url = `${API_BASE}/api/batch/operations`;
+    if (machineId) {
+      url += `?machineId=${encodeURIComponent(machineId)}`;
+    }
+
+    try {
+      const res = await fetch(url);
+      this.batchHistoryList = await res.json();
+      this.renderBatchHistory();
+    } catch (e) {
+      console.error('加载历史记录失败:', e);
+    }
+  }
+
+  renderBatchHistory() {
+    const container = document.getElementById('batch-history-list');
+    if (this.batchHistoryList.length === 0) {
+      container.innerHTML = '<div style="color:#8c8c8c;padding:40px;text-align:center;">暂无批量操作记录</div>';
+      return;
+    }
+
+    container.innerHTML = this.batchHistoryList.map(op => {
+      const typeLabel = op.operationType === 'send_event' ? '📤 发送事件'
+        : op.operationType === 'freeze' ? '❄️ 冻结'
+        : '☀️ 解冻';
+
+      return `
+        <div class="batch-history-card" data-id="${op.id}">
+          <div class="batch-history-header">
+            <span class="batch-history-type">${typeLabel}</span>
+            <span class="batch-history-time">${this.formatTime(op.createdAt)}</span>
+          </div>
+          <div class="batch-history-tags">
+            ${op.targetTags.map(t => `<span class="tag-chip-small">${escapeHtml(t)}</span>`).join('')}
+          </div>
+          <div class="batch-history-stats">
+            <span class="stat-item">
+              <span class="stat-label">总数</span>
+              <span class="stat-value">${op.totalCount}</span>
+            </span>
+            <span class="stat-item success">
+              <span class="stat-label">成功</span>
+              <span class="stat-value">${op.successCount}</span>
+            </span>
+            <span class="stat-item failed">
+              <span class="stat-label">失败</span>
+              <span class="stat-value">${op.failedCount}</span>
+            </span>
+            <span class="stat-item skipped">
+              <span class="stat-label">跳过</span>
+              <span class="stat-value">${op.skippedCount}</span>
+            </span>
+          </div>
+          <div class="batch-history-operator">
+            操作人: ${escapeHtml(op.operatorName)}
+            ${op.eventName ? ` · 事件: ${escapeHtml(op.eventName)}` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    container.querySelectorAll('.batch-history-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const id = card.getAttribute('data-id');
+        this.showBatchHistoryDetail(id);
+      });
+    });
+  }
+
+  async showBatchHistoryDetail(id) {
+    try {
+      const res = await fetch(`${API_BASE}/api/batch/operations/${id}`);
+      this.batchCurrentHistoryDetail = await res.json();
+      if (this.batchCurrentHistoryDetail.error) {
+        throw new Error(this.batchCurrentHistoryDetail.error);
+      }
+      this.renderBatchHistoryDetail();
+      document.getElementById('batch-history-list').parentElement.style.display = 'none';
+      document.getElementById('batch-history-detail').style.display = 'block';
+    } catch (e) {
+      toast('加载详情失败: ' + e.message, 'error');
+    }
+  }
+
+  showBatchHistoryList() {
+    document.getElementById('batch-history-detail').style.display = 'none';
+    document.getElementById('batch-history-list').parentElement.style.display = 'block';
+  }
+
+  renderBatchHistoryDetail() {
+    const detail = this.batchCurrentHistoryDetail;
+    if (!detail) return;
+
+    const typeLabel = detail.operationType === 'send_event' ? '📤 批量发送事件'
+      : detail.operationType === 'freeze' ? '❄️ 批量冻结'
+      : '☀️ 批量解冻';
+
+    const container = document.getElementById('history-detail-content');
+    container.innerHTML = `
+      <div class="history-detail-header">
+        <h3>${typeLabel}</h3>
+        <div class="history-detail-meta">
+          <div>操作人: <strong>${escapeHtml(detail.operatorName)}</strong></div>
+          <div>发起时间: ${this.formatTime(detail.createdAt)}</div>
+          <div>目标标签: ${detail.targetTags.map(t => `<span class="tag-chip-small">${escapeHtml(t)}</span>`).join(' ')}</div>
+          ${detail.eventName ? `<div>事件: <strong>${escapeHtml(detail.eventName)}</strong></div>` : ''}
+        </div>
+      </div>
+      <div class="batch-history-stats" style="margin:20px 0;">
+        <span class="stat-item">
+          <span class="stat-label">总数</span>
+          <span class="stat-value">${detail.totalCount}</span>
+        </span>
+        <span class="stat-item success">
+          <span class="stat-label">成功</span>
+          <span class="stat-value">${detail.successCount}</span>
+        </span>
+        <span class="stat-item failed">
+          <span class="stat-label">失败</span>
+          <span class="stat-value">${detail.failedCount}</span>
+        </span>
+        <span class="stat-item skipped">
+          <span class="stat-label">跳过</span>
+          <span class="stat-value">${detail.skippedCount}</span>
+        </span>
+      </div>
+      <div class="history-detail-results">
+        <h4>执行明细</h4>
+        <div class="execute-results">
+          ${detail.results.map(r => {
+            let statusClass = '';
+            let statusIcon = '';
+            if (r.status === 'success') {
+              statusClass = 'result-success';
+              statusIcon = '✅';
+            } else if (r.status === 'skipped') {
+              statusClass = 'result-skipped';
+              statusIcon = '⏭️';
+            } else {
+              statusClass = 'result-failed';
+              statusIcon = '❌';
+            }
+            return `
+              <div class="execute-result-item ${statusClass}">
+                <span class="result-icon">${statusIcon}</span>
+                <span class="result-instance-id">${r.instanceId.slice(0, 12)}...</span>
+                <span class="result-message">${escapeHtml(r.message)}</span>
+                <span class="result-time">${this.formatTime(r.executedAt)}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  }
+
 }
 
 window.addEventListener('DOMContentLoaded', () => {
