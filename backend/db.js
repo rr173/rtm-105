@@ -209,6 +209,53 @@ async function migrateDB() {
       console.log('Migrate note: instance_link_skip_logs.link_id NOT NULL constraint preserved, will pass null-safe values');
     }
   }
+
+  const hasDiffReportsTable = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name='version_diff_reports'`);
+  if (!hasDiffReportsTable) {
+    await run(`
+      CREATE TABLE version_diff_reports (
+        id TEXT PRIMARY KEY,
+        machine_name TEXT NOT NULL,
+        old_machine_id TEXT NOT NULL,
+        new_machine_id TEXT NOT NULL,
+        old_version INTEGER NOT NULL,
+        new_version INTEGER NOT NULL,
+        diff_data TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        has_changes INTEGER NOT NULL DEFAULT 1,
+        triggered_by TEXT NOT NULL DEFAULT 'publish',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (old_machine_id) REFERENCES machines(id),
+        FOREIGN KEY (new_machine_id) REFERENCES machines(id)
+      )
+    `);
+    await run('CREATE INDEX idx_diff_reports_machine_name ON version_diff_reports(machine_name)');
+    await run('CREATE INDEX idx_diff_reports_old_machine ON version_diff_reports(old_machine_id)');
+    await run('CREATE INDEX idx_diff_reports_new_machine ON version_diff_reports(new_machine_id)');
+    await run('CREATE INDEX idx_diff_reports_created ON version_diff_reports(created_at)');
+    console.log('Migrated: created version_diff_reports table');
+  }
+
+  const hasDiffImpactTable = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name='version_diff_impact'`);
+  if (!hasDiffImpactTable) {
+    await run(`
+      CREATE TABLE version_diff_impact (
+        id TEXT PRIMARY KEY,
+        diff_report_id TEXT NOT NULL,
+        instance_id TEXT NOT NULL,
+        current_state_id TEXT NOT NULL,
+        risk_level TEXT NOT NULL,
+        reasons_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (diff_report_id) REFERENCES version_diff_reports(id),
+        FOREIGN KEY (instance_id) REFERENCES instances(id)
+      )
+    `);
+    await run('CREATE INDEX idx_diff_impact_report ON version_diff_impact(diff_report_id)');
+    await run('CREATE INDEX idx_diff_impact_instance ON version_diff_impact(instance_id)');
+    await run('CREATE INDEX idx_diff_impact_risk ON version_diff_impact(risk_level)');
+    console.log('Migrated: created version_diff_impact table');
+  }
 }
 
 function initDB() {
@@ -502,6 +549,43 @@ function initDB() {
         CREATE INDEX IF NOT EXISTS idx_link_skip_logs_source ON instance_link_skip_logs(source_instance_id);
         CREATE INDEX IF NOT EXISTS idx_link_skip_logs_target ON instance_link_skip_logs(target_instance_id);
         CREATE INDEX IF NOT EXISTS idx_link_skip_logs_created ON instance_link_skip_logs(created_at);
+
+        CREATE TABLE IF NOT EXISTS version_diff_reports (
+          id TEXT PRIMARY KEY,
+          machine_name TEXT NOT NULL,
+          old_machine_id TEXT NOT NULL,
+          new_machine_id TEXT NOT NULL,
+          old_version INTEGER NOT NULL,
+          new_version INTEGER NOT NULL,
+          diff_data TEXT NOT NULL,
+          summary_json TEXT NOT NULL,
+          has_changes INTEGER NOT NULL DEFAULT 1,
+          triggered_by TEXT NOT NULL DEFAULT 'publish',
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (old_machine_id) REFERENCES machines(id),
+          FOREIGN KEY (new_machine_id) REFERENCES machines(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_diff_reports_machine_name ON version_diff_reports(machine_name);
+        CREATE INDEX IF NOT EXISTS idx_diff_reports_old_machine ON version_diff_reports(old_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_diff_reports_new_machine ON version_diff_reports(new_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_diff_reports_created ON version_diff_reports(created_at);
+
+        CREATE TABLE IF NOT EXISTS version_diff_impact (
+          id TEXT PRIMARY KEY,
+          diff_report_id TEXT NOT NULL,
+          instance_id TEXT NOT NULL,
+          current_state_id TEXT NOT NULL,
+          risk_level TEXT NOT NULL,
+          reasons_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (diff_report_id) REFERENCES version_diff_reports(id),
+          FOREIGN KEY (instance_id) REFERENCES instances(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_diff_impact_report ON version_diff_impact(diff_report_id);
+        CREATE INDEX IF NOT EXISTS idx_diff_impact_instance ON version_diff_impact(instance_id);
+        CREATE INDEX IF NOT EXISTS idx_diff_impact_risk ON version_diff_impact(risk_level);
       `, (err) => {
         if (err) return reject(err);
         migrateDB().then(resolve).catch(reject);

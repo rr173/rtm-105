@@ -155,6 +155,27 @@ const {
   getSkipLogsByLinkId,
   getCascadeHistoryByLinkId
 } = require('./cascade-engine');
+const {
+  compareDefinitions,
+  compareMachines,
+  DIFF_TYPE,
+  RISK_LEVEL
+} = require('./version-diff-engine');
+const {
+  assessMigrationImpact,
+  assessImpactByDiff
+} = require('./impact-assessment');
+const {
+  saveDiffReport,
+  getDiffReportById,
+  getDiffReportsByMachineName,
+  listDiffReports,
+  compareAndSaveDiff,
+  getLatestDiffReport,
+  getDiffReportWithImpact,
+  saveImpactAssessment,
+  generateAndSaveImpact
+} = require('./diff-reports');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -310,7 +331,31 @@ app.post('/api/machines', async (req, res) => {
       definitionSnapshot: definition
     });
 
-    res.json({ ...machine, latestAnalysisReport: report });
+    let latestDiffReport = null;
+    let impactAssessment = null;
+    if (version > 1) {
+      const oldMachines = await getMachineVersionsByName(name);
+      const oldMachine = oldMachines.find(m => m.version === version - 1);
+      if (oldMachine) {
+        const diffResult = compareMachines(oldMachine, machine);
+        latestDiffReport = await saveDiffReport({
+          oldMachineId: oldMachine.id,
+          newMachineId: id,
+          diffResult,
+          triggeredBy: 'publish'
+        });
+        
+        impactAssessment = await assessMigrationImpact(oldMachine.id, id);
+        await saveImpactAssessment(latestDiffReport.id, impactAssessment);
+      }
+    }
+
+    res.json({ 
+      ...machine, 
+      latestAnalysisReport: report,
+      latestDiffReport,
+      impactAssessment
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -598,6 +643,131 @@ app.post('/api/migration/execute', async (req, res) => {
       failedCount: result.failedCount,
       results: result.results
     });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/diff/compare', async (req, res) => {
+  try {
+    const { oldMachineId, newMachineId } = req.body;
+    if (!oldMachineId || !newMachineId) {
+      return res.status(400).json({ error: 'oldMachineId and newMachineId are required' });
+    }
+
+    const oldMachine = await getMachineById(oldMachineId);
+    const newMachine = await getMachineById(newMachineId);
+
+    if (!oldMachine || !newMachine) {
+      return res.status(404).json({ error: 'One or both machines not found' });
+    }
+
+    if (oldMachine.name !== newMachine.name) {
+      return res.status(400).json({ error: 'Can only compare machines with the same name' });
+    }
+
+    const diffResult = compareMachines(oldMachine, newMachine);
+    res.json(diffResult);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/diff/compare-and-save', async (req, res) => {
+  try {
+    const { oldMachineId, newMachineId, triggeredBy } = req.body;
+    if (!oldMachineId || !newMachineId) {
+      return res.status(400).json({ error: 'oldMachineId and newMachineId are required' });
+    }
+
+    const result = await compareAndSaveDiff(oldMachineId, newMachineId, triggeredBy || 'manual');
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/diff/reports', async (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.machineName) filters.machineName = req.query.machineName;
+    if (req.query.triggeredBy) filters.triggeredBy = req.query.triggeredBy;
+    if (req.query.limit) filters.limit = parseInt(req.query.limit, 10);
+
+    const reports = await listDiffReports(filters);
+    res.json(reports);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/diff/reports/:id', async (req, res) => {
+  try {
+    const report = await getDiffReportById(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Diff report not found' });
+    }
+    res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/diff/reports/:id/with-impact', async (req, res) => {
+  try {
+    const report = await getDiffReportWithImpact(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Diff report not found' });
+    }
+    res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/diff/machines/:machineName/reports', async (req, res) => {
+  try {
+    const reports = await getDiffReportsByMachineName(req.params.machineName);
+    res.json(reports);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/diff/machines/:machineName/latest', async (req, res) => {
+  try {
+    const report = await getLatestDiffReport(req.params.machineName);
+    if (!report) {
+      return res.status(404).json({ error: 'No diff report found for this machine' });
+    }
+    res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/diff/reports/:id/impact', async (req, res) => {
+  try {
+    const result = await generateAndSaveImpact(req.params.id);
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/impact/assess', async (req, res) => {
+  try {
+    const { sourceMachineId, targetMachineId, instanceIds } = req.body;
+    if (!sourceMachineId || !targetMachineId) {
+      return res.status(400).json({ error: 'sourceMachineId and targetMachineId are required' });
+    }
+
+    const result = await assessMigrationImpact(
+      sourceMachineId,
+      targetMachineId,
+      instanceIds && instanceIds.length > 0 ? instanceIds : null
+    );
+    res.json(result);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -2994,6 +3164,142 @@ app.get('/api/links/:id/cascade-history', async (req, res) => {
   }
 });
 
+async function seedOrderReviewV2() {
+  const orderMachineRow = await get('SELECT * FROM machines WHERE name = ? ORDER BY version DESC LIMIT 1', ['订单审批']);
+  if (!orderMachineRow) {
+    console.log('[OrderReviewV2] No 订单审批 machine found, skipping v2 seeding.');
+    return;
+  }
+
+  const existingVersions = await all('SELECT * FROM machines WHERE name = ? ORDER BY version DESC', ['订单审批']);
+  if (existingVersions.length > 1) {
+    console.log('[OrderReviewV2] 订单审批 already has multiple versions, skipping v2 seeding.');
+    return;
+  }
+
+  const oldDefinition = JSON.parse(orderMachineRow.definition);
+  const oldStates = oldDefinition.states;
+  const oldTransitions = oldDefinition.transitions;
+
+  const pendingState = oldStates.find(s => s.name === '待审批');
+  const approvedState = oldStates.find(s => s.name === '已批准');
+  const rejectState = oldStates.find(s => s.name === '已拒绝');
+
+  if (!pendingState || !approvedState) {
+    console.log('[OrderReviewV2] Could not find required states, skipping v2 seeding.');
+    return;
+  }
+
+  const reviewState = {
+    id: uuidv4(),
+    name: '复核中',
+    isInitial: false,
+    isFinal: false,
+    x: 330,
+    y: 180,
+    timeout: { duration: 60, event: 'timeout_review', payload: { reason: '复核超时自动通过' } }
+  };
+
+  const newStates = [...oldStates];
+  const reviewStateIndex = newStates.findIndex(s => s.id === pendingState.id);
+  if (reviewStateIndex >= 0) {
+    newStates.splice(reviewStateIndex + 1, 0, reviewState);
+  } else {
+    newStates.push(reviewState);
+  }
+
+  const newTransitions = [];
+  for (const t of oldTransitions) {
+    if (t.sourceStateId === pendingState.id && t.event === 'approve' && t.targetStateId === approvedState.id) {
+      continue;
+    }
+    newTransitions.push({ ...t });
+  }
+
+  newTransitions.push({
+    id: uuidv4(),
+    sourceStateId: pendingState.id,
+    targetStateId: reviewState.id,
+    event: 'approve',
+    guard: ''
+  });
+
+  newTransitions.push({
+    id: uuidv4(),
+    sourceStateId: reviewState.id,
+    targetStateId: approvedState.id,
+    event: 'review_pass',
+    guard: ''
+  });
+
+  newTransitions.push({
+    id: uuidv4(),
+    sourceStateId: reviewState.id,
+    targetStateId: rejectState.id,
+    event: 'review_reject',
+    guard: ''
+  });
+
+  newTransitions.push({
+    id: uuidv4(),
+    sourceStateId: reviewState.id,
+    targetStateId: approvedState.id,
+    event: 'timeout_review',
+    guard: ''
+  });
+
+  const newVersion = orderMachineRow.version + 1;
+  const newMachineId = uuidv4();
+  const now = new Date().toISOString();
+  const newDefinition = { states: newStates, transitions: newTransitions };
+
+  const analysisResult = analyzeMachineDefinition(newDefinition);
+
+  await run(
+    'INSERT INTO machines (id, name, version, created_at, definition) VALUES (?, ?, ?, ?, ?)',
+    [newMachineId, '订单审批', newVersion, now, JSON.stringify(newDefinition)]
+  );
+
+  await saveAnalysisReport({
+    machineId: newMachineId,
+    machineVersion: newVersion,
+    machineName: '订单审批',
+    analysisResult,
+    triggeredBy: 'startup_seed',
+    definitionSnapshot: newDefinition
+  });
+
+  const oldMachine = {
+    id: orderMachineRow.id,
+    name: orderMachineRow.name,
+    version: orderMachineRow.version,
+    createdAt: orderMachineRow.created_at,
+    definition: oldDefinition
+  };
+  const newMachine = {
+    id: newMachineId,
+    name: '订单审批',
+    version: newVersion,
+    createdAt: now,
+    definition: newDefinition
+  };
+
+  const diffResult = compareMachines(oldMachine, newMachine);
+  const diffReport = await saveDiffReport({
+    oldMachineId: orderMachineRow.id,
+    newMachineId,
+    diffResult,
+    triggeredBy: 'startup_seed'
+  });
+
+  const impactAssessment = await assessMigrationImpact(orderMachineRow.id, newMachineId);
+  await saveImpactAssessment(diffReport.id, impactAssessment);
+
+  console.log(`[OrderReviewV2] Successfully published 订单审批 v${newVersion} with "复核中" state.`);
+  console.log(`[OrderReviewV2] Diff report saved: ${diffReport.id}, changes: ${diffResult.summary.totalChanges}`);
+  console.log(`[OrderReviewV2] Impact assessment: safe=${impactAssessment.stats.safe}, attention=${impactAssessment.stats.attention}, dangerous=${impactAssessment.stats.dangerous}`);
+}
+
 async function start() {
   try {
     await initDB();
@@ -3007,6 +3313,7 @@ async function start() {
     await seedDemoSlaData();
     await seedDemoWebhookData();
     await seedCascadeDemoData();
+    await seedOrderReviewV2();
     await rebuildAllTimers();
     startSlaScanner(10);
 
