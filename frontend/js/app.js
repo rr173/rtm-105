@@ -157,6 +157,7 @@ class WorkflowApp {
     });
     this.bindTemplateMarketEvents();
     this.bindMigrationEvents();
+    this.bindRollbackEvents();
     this.bindTakeoverEvents();
     this.bindBatchEvents();
   }
@@ -1177,6 +1178,7 @@ class WorkflowApp {
                   </div>
                   <div class="version-actions">
                     ${hasActiveInstances ? `<button class="btn-migrate" data-migrate="${escapeHtml(m.id)}" data-name="${escapeHtml(group.name)}">迁移实例</button>` : ''}
+                    ${isLatest && m.activeInstances > 0 ? `<button class="btn-rollback" data-rollback-name="${escapeHtml(group.name)}" data-rollback-version="${m.version}" style="background:#ff4d4f;color:white;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px;">版本回滚</button>` : ''}
                   </div>
                 </div>
               `;
@@ -1201,7 +1203,7 @@ class WorkflowApp {
     
     list.querySelectorAll('.machine-version-item').forEach(el => {
       el.onclick = (e) => {
-        if (e.target.closest('.btn-migrate')) return;
+        if (e.target.closest('.btn-migrate') || e.target.closest('.btn-rollback')) return;
         this.loadMachine(el.dataset.id);
       };
     });
@@ -1210,6 +1212,13 @@ class WorkflowApp {
       el.onclick = (e) => {
         e.stopPropagation();
         this.openMigrationModal(el.dataset.migrate, el.dataset.name);
+      };
+    });
+
+    list.querySelectorAll('.btn-rollback').forEach(el => {
+      el.onclick = (e) => {
+        e.stopPropagation();
+        this.openRollbackModal(el.dataset.rollbackName, Number(el.dataset.rollbackVersion));
       };
     });
   }
@@ -1396,6 +1405,12 @@ class WorkflowApp {
         this.loadInstances();
       }
       this.loadMachines();
+    } else if (msg.type === 'version_rollback' || msg.type === 'version_rollback_in') {
+      toast(`⏪ 状态机 [${msg.machineName}] 版本回滚: v${msg.fromVersion} → v${msg.toVersion}，${msg.successCount} 个实例已迁回`, 'warning');
+      this.loadMachines();
+      if (this.selectedMachine) {
+        this.loadInstances();
+      }
     } else if (msg.type === 'takeover_started') {
       toast(`🚨 实例 ${msg.instanceId.slice(0, 8)}… 已被 ${msg.operatorName} 接管`, 'warning');
       this.updateInstanceFrozenStatus(msg.instanceId, true, msg.operatorName);
@@ -2076,6 +2091,192 @@ class WorkflowApp {
           ${r.warnings && r.warnings.length > 0 ? `
             <div class="result-warnings">
               ${r.warnings.map(w => `<div>⚠️ ${escapeHtml(w)}</div>`).join('')}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }).join('');
+  }
+
+  bindRollbackEvents() {
+    document.getElementById('btn-close-rollback').addEventListener('click', () => this.closeRollbackModal());
+    document.getElementById('rollback-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'rollback-modal') this.closeRollbackModal();
+    });
+    document.getElementById('btn-cancel-rollback').addEventListener('click', () => this.closeRollbackModal());
+    document.getElementById('rollback-target-version').addEventListener('change', (e) => this.onRollbackTargetChange(e.target.value));
+    document.getElementById('btn-execute-rollback').addEventListener('click', () => this.executeRollbackAction());
+    document.getElementById('btn-close-rollback-result').addEventListener('click', () => this.closeRollbackModal());
+    document.getElementById('btn-rollback-back').addEventListener('click', () => this.showRollbackStep('config'));
+  }
+
+  async openRollbackModal(machineName, currentVersion) {
+    try {
+      this.rollbackMachineName = machineName;
+      this.rollbackCurrentVersion = currentVersion;
+
+      document.getElementById('rollback-machine-name').textContent = machineName;
+      document.getElementById('rollback-current-version').textContent = `v${currentVersion}`;
+      document.getElementById('rollback-active-warning').style.display = 'none';
+
+      const res = await fetch(API_BASE + '/api/machines/' + encodeURIComponent(machineName) + '/versions');
+      const versions = await res.json();
+
+      const targetSelect = document.getElementById('rollback-target-version');
+      targetSelect.innerHTML = '<option value="">-- 请选择目标版本 --</option>';
+      for (const v of versions) {
+        if (v.version < currentVersion) {
+          targetSelect.innerHTML += `<option value="${v.version}">v${v.version}</option>`;
+        }
+      }
+
+      if (targetSelect.options.length <= 1) {
+        toast('没有可回滚的旧版本', 'error');
+        return;
+      }
+
+      try {
+        const activeRes = await fetch(API_BASE + '/api/rollback/active/' + encodeURIComponent(machineName));
+        const activeData = await activeRes.json();
+        if (activeData.active) {
+          document.getElementById('rollback-active-warning').style.display = 'block';
+          document.getElementById('rollback-active-warning').textContent = '⚠️ 该状态机当前有回滚操作正在执行中';
+          document.getElementById('btn-execute-rollback').disabled = true;
+        }
+      } catch (_) {}
+
+      const savedName = localStorage.getItem('rollbackOperatorName') || '';
+      document.getElementById('rollback-operator-name').value = savedName;
+      document.getElementById('rollback-reason').value = '';
+      document.getElementById('btn-execute-rollback').disabled = true;
+
+      this.showRollbackStep('config');
+      document.getElementById('rollback-modal').style.display = 'flex';
+    } catch (e) {
+      toast('打开回滚对话框失败: ' + e.message, 'error');
+    }
+  }
+
+  closeRollbackModal() {
+    document.getElementById('rollback-modal').style.display = 'none';
+    this.rollbackMachineName = null;
+    this.rollbackCurrentVersion = null;
+  }
+
+  showRollbackStep(step) {
+    document.getElementById('rollback-step-config').style.display = step === 'config' ? 'block' : 'none';
+    document.getElementById('rollback-step-progress').style.display = step === 'progress' ? 'block' : 'none';
+    document.getElementById('rollback-step-records').style.display = step === 'records' ? 'block' : 'none';
+  }
+
+  onRollbackTargetChange(value) {
+    const operatorName = document.getElementById('rollback-operator-name').value.trim();
+    document.getElementById('btn-execute-rollback').disabled = !value || !operatorName;
+  }
+
+  async executeRollbackAction() {
+    const targetVersion = document.getElementById('rollback-target-version').value;
+    const operatorName = document.getElementById('rollback-operator-name').value.trim();
+    const reason = document.getElementById('rollback-reason').value.trim();
+
+    if (!targetVersion || !operatorName) {
+      toast('请选择目标版本并填写操作人姓名', 'error');
+      return;
+    }
+
+    if (!confirm(`确认将状态机 [${this.rollbackMachineName}] 从 v${this.rollbackCurrentVersion} 回滚到 v${targetVersion}？\n\n所有活跃实例将根据影响评估自动迁移或跳过。`)) {
+      return;
+    }
+
+    localStorage.setItem('rollbackOperatorName', operatorName);
+
+    this.showRollbackStep('progress');
+    document.getElementById('rollback-progress-fill').style.width = '10%';
+    document.getElementById('rollback-progress-text').textContent = '正在执行回滚...';
+
+    try {
+      const operatorId = 'rollback_user_' + Date.now();
+      const res = await fetch(API_BASE + '/api/rollback/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          machineName: this.rollbackMachineName,
+          targetVersion: Number(targetVersion),
+          operatorId,
+          operatorName,
+          reason
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || '回滚失败');
+      }
+
+      const result = await res.json();
+
+      document.getElementById('rollback-progress-fill').style.width = '100%';
+      document.getElementById('rollback-progress-text').textContent =
+        `回滚完成: ${result.successCount} 成功, ${result.failedCount} 失败, ${result.skippedCount} 跳过`;
+      document.getElementById('rollback-success-count').textContent = result.successCount;
+      document.getElementById('rollback-failed-count').textContent = result.failedCount;
+      document.getElementById('rollback-skipped-count').textContent = result.skippedCount;
+
+      this.renderRollbackResultDetails(result);
+
+      await this.loadMachines();
+      if (this.selectedMachine) {
+        await this.loadInstances();
+      }
+    } catch (e) {
+      document.getElementById('rollback-progress-text').textContent = '回滚失败: ' + e.message;
+      toast('回滚失败: ' + e.message, 'error');
+    }
+  }
+
+  renderRollbackResultDetails(result) {
+    const container = document.getElementById('rollback-result-details');
+    if (!result.details || result.details.length === 0) {
+      container.innerHTML = '<div style="color:#8c8c8c;">无实例需要处理</div>';
+      return;
+    }
+
+    container.innerHTML = result.details.map(d => {
+      let actionLabel = '';
+      let actionStyle = '';
+      if (d.action === 'migrated') {
+        actionLabel = '已迁移';
+        actionStyle = 'color:#52c41a;';
+      } else if (d.action === 'skipped_dangerous') {
+        actionLabel = '跳过(危险)';
+        actionStyle = 'color:#fa8c16;';
+      } else {
+        actionLabel = '失败';
+        actionStyle = 'color:#ff4d4f;';
+      }
+
+      const riskBadge = d.riskLevel === 'safe'
+        ? '<span style="background:#f6ffed;color:#52c41a;padding:1px 6px;border-radius:3px;font-size:11px;">安全</span>'
+        : d.riskLevel === 'attention'
+        ? '<span style="background:#fff7e6;color:#fa8c16;padding:1px 6px;border-radius:3px;font-size:11px;">需关注</span>'
+        : '<span style="background:#fff1f0;color:#ff4d4f;padding:1px 6px;border-radius:3px;font-size:11px;">危险</span>';
+
+      return `
+        <div class="execute-result-item">
+          <div class="result-header">
+            <span class="result-id">${escapeHtml(d.instanceId)}</span>
+            ${riskBadge}
+            <span style="${actionStyle}font-weight:600;">${actionLabel}</span>
+          </div>
+          ${d.action === 'migrated' && d.toStateId ? `
+            <div style="font-size:12px;color:#52c41a;">
+              ${escapeHtml(d.fromStateId)} → ${escapeHtml(d.toStateId)}
+            </div>
+          ` : ''}
+          ${d.errorMessage ? `<div class="result-reason">${escapeHtml(d.errorMessage)}</div>` : ''}
+          ${d.reasons && d.reasons.length > 0 ? `
+            <div class="result-warnings">
+              ${d.reasons.map(r => `<div>⚠️ ${escapeHtml(r)}</div>`).join('')}
             </div>
           ` : ''}
         </div>

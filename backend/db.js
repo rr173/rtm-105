@@ -586,6 +586,52 @@ function initDB() {
         CREATE INDEX IF NOT EXISTS idx_diff_impact_report ON version_diff_impact(diff_report_id);
         CREATE INDEX IF NOT EXISTS idx_diff_impact_instance ON version_diff_impact(instance_id);
         CREATE INDEX IF NOT EXISTS idx_diff_impact_risk ON version_diff_impact(risk_level);
+
+        CREATE TABLE IF NOT EXISTS version_rollback_records (
+          id TEXT PRIMARY KEY,
+          machine_name TEXT NOT NULL,
+          from_machine_id TEXT NOT NULL,
+          to_machine_id TEXT NOT NULL,
+          from_version INTEGER NOT NULL,
+          to_version INTEGER NOT NULL,
+          operator_id TEXT NOT NULL,
+          operator_name TEXT NOT NULL,
+          total_instances INTEGER NOT NULL DEFAULT 0,
+          success_count INTEGER NOT NULL DEFAULT 0,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          skipped_count INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'running',
+          reason TEXT,
+          created_at TEXT NOT NULL,
+          completed_at TEXT,
+          FOREIGN KEY (from_machine_id) REFERENCES machines(id),
+          FOREIGN KEY (to_machine_id) REFERENCES machines(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rollback_records_machine_name ON version_rollback_records(machine_name);
+        CREATE INDEX IF NOT EXISTS idx_rollback_records_from_machine ON version_rollback_records(from_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_rollback_records_to_machine ON version_rollback_records(to_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_rollback_records_status ON version_rollback_records(status);
+        CREATE INDEX IF NOT EXISTS idx_rollback_records_created ON version_rollback_records(created_at);
+
+        CREATE TABLE IF NOT EXISTS version_rollback_details (
+          id TEXT PRIMARY KEY,
+          rollback_id TEXT NOT NULL,
+          instance_id TEXT NOT NULL,
+          from_state_id TEXT NOT NULL,
+          to_state_id TEXT,
+          risk_level TEXT NOT NULL,
+          reasons_json TEXT,
+          action TEXT NOT NULL,
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (rollback_id) REFERENCES version_rollback_records(id),
+          FOREIGN KEY (instance_id) REFERENCES instances(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rollback_details_rollback ON version_rollback_details(rollback_id);
+        CREATE INDEX IF NOT EXISTS idx_rollback_details_instance ON version_rollback_details(instance_id);
+        CREATE INDEX IF NOT EXISTS idx_rollback_details_action ON version_rollback_details(action);
       `, (err) => {
         if (err) return reject(err);
         migrateDB().then(resolve).catch(reject);

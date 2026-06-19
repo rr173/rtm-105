@@ -176,6 +176,12 @@ const {
   saveImpactAssessment,
   generateAndSaveImpact
 } = require('./diff-reports');
+const {
+  isRollbackActive,
+  executeRollback,
+  getRollbackRecordWithDetails,
+  listRollbackRecords
+} = require('./rollback-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -770,6 +776,101 @@ app.post('/api/impact/assess', async (req, res) => {
     res.json(result);
   } catch (e) {
     res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/rollback/execute', async (req, res) => {
+  try {
+    const { machineName, targetVersion, operatorId, operatorName, reason } = req.body;
+    if (!machineName) {
+      return res.status(400).json({ error: 'machineName is required' });
+    }
+    if (targetVersion === undefined || targetVersion === null) {
+      return res.status(400).json({ error: 'targetVersion is required' });
+    }
+    if (!operatorId || !operatorName) {
+      return res.status(400).json({ error: 'operatorId and operatorName are required' });
+    }
+
+    if (isRollbackActive(machineName)) {
+      return res.status(409).json({
+        error: `状态机 [${machineName}] 已有回滚操作正在执行，请稍后再试`,
+        machineName
+      });
+    }
+
+    const result = await executeRollback({
+      machineName,
+      targetVersion: Number(targetVersion),
+      operatorId,
+      operatorName,
+      reason
+    });
+
+    broadcastToMachine(result.fromMachineId, {
+      type: 'version_rollback',
+      rollbackId: result.rollbackId,
+      machineName,
+      fromVersion: result.fromVersion,
+      toVersion: result.toVersion,
+      operatorId,
+      operatorName,
+      totalInstances: result.totalInstances,
+      successCount: result.successCount,
+      failedCount: result.failedCount,
+      skippedCount: result.skippedCount,
+      timestamp: result.createdAt
+    });
+
+    broadcastToMachine(result.toMachineId, {
+      type: 'version_rollback_in',
+      rollbackId: result.rollbackId,
+      machineName,
+      fromVersion: result.fromVersion,
+      toVersion: result.toVersion,
+      operatorId,
+      operatorName,
+      totalInstances: result.totalInstances,
+      successCount: result.successCount,
+      timestamp: result.createdAt
+    });
+
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/rollback/records', async (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.machineName) filters.machineName = req.query.machineName;
+    if (req.query.status) filters.status = req.query.status;
+    if (req.query.operatorId) filters.operatorId = req.query.operatorId;
+    if (req.query.limit) filters.limit = parseInt(req.query.limit, 10);
+    const records = await listRollbackRecords(filters);
+    res.json(records);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/rollback/records/:id', async (req, res) => {
+  try {
+    const record = await getRollbackRecordWithDetails(req.params.id);
+    if (!record) return res.status(404).json({ error: 'Rollback record not found' });
+    res.json(record);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/rollback/active/:machineName', async (req, res) => {
+  try {
+    const active = isRollbackActive(req.params.machineName);
+    res.json({ machineName: req.params.machineName, active });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

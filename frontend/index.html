@@ -783,6 +783,87 @@
     </div>
   </div>
 
+  <div id="rollback-modal" class="modal-overlay" style="display:none; z-index: 10003;">
+    <div class="modal" style="max-width: 900px; max-height: 85vh;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #ff4d4f 0%, #cf1322 100%);">
+        <h2>⏪ 版本回滚</h2>
+        <button id="btn-close-rollback" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body" id="rollback-body">
+        <div id="rollback-step-config">
+          <div class="migration-info">
+            <div class="info-block">
+              <label>状态机</label>
+              <div id="rollback-machine-name" class="info-value" style="font-weight:600;"></div>
+            </div>
+            <div class="info-block">
+              <label>当前版本</label>
+              <div id="rollback-current-version" class="info-value"></div>
+            </div>
+            <div class="info-block">
+              <label>回滚到版本</label>
+              <select id="rollback-target-version" class="form-control">
+                <option value="">-- 请选择目标版本 --</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group" style="margin-top:12px;">
+            <label>回滚原因</label>
+            <textarea id="rollback-reason" class="form-control" rows="2" placeholder="请简要说明回滚原因..."></textarea>
+          </div>
+          <div class="form-group" style="margin-top:8px;">
+            <label>操作人姓名 <span style="color:#ff4d4f;">*</span></label>
+            <input type="text" id="rollback-operator-name" class="form-control" placeholder="请输入您的姓名">
+          </div>
+          <div id="rollback-active-warning" style="display:none; color:#ff4d4f; font-size:13px; margin-top:8px;"></div>
+          <div class="migration-actions" style="margin-top:16px;">
+            <button id="btn-cancel-rollback" class="btn">取消</button>
+            <button id="btn-execute-rollback" class="btn btn-danger" disabled>确认回滚</button>
+          </div>
+        </div>
+
+        <div id="rollback-step-progress" style="display:none;">
+          <div class="migration-progress">
+            <div class="progress-bar">
+              <div class="progress-fill" id="rollback-progress-fill" style="width: 0%"></div>
+            </div>
+            <div class="progress-text" id="rollback-progress-text">正在执行回滚...</div>
+          </div>
+          <div class="migration-summary" style="margin-top:16px;">
+            <div class="summary-card summary-success">
+              <div class="summary-count" id="rollback-success-count">0</div>
+              <div class="summary-label">已迁移</div>
+            </div>
+            <div class="summary-card summary-danger">
+              <div class="summary-count" id="rollback-failed-count">0</div>
+              <div class="summary-label">失败</div>
+            </div>
+            <div class="summary-card" style="background:#fff7e6;">
+              <div class="summary-count" id="rollback-skipped-count" style="color:#fa8c16;">0</div>
+              <div class="summary-label" style="color:#fa8c16;">跳过(危险)</div>
+            </div>
+          </div>
+          <div class="migration-result-list" style="margin-top:16px;">
+            <h4>回滚明细</h4>
+            <div id="rollback-result-details" class="execute-results" style="max-height:300px;overflow-y:auto;"></div>
+          </div>
+          <div class="migration-actions" style="margin-top:16px;">
+            <button id="btn-close-rollback-result" class="btn btn-primary">完成</button>
+          </div>
+        </div>
+
+        <div id="rollback-step-records" style="display:none;">
+          <div class="section-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <h4>📜 回滚操作记录</h4>
+            <button id="btn-rollback-back" class="btn btn-sm">&larr; 返回</button>
+          </div>
+          <div id="rollback-records-list" style="max-height:400px;overflow-y:auto;"></div>
+          <div id="rollback-record-detail" style="display:none;margin-top:12px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="js/app.js"></script>
 </body>
 </html>
