@@ -16,6 +16,7 @@
       <button id="btn-open-simulation" class="btn" style="background: #722ed1;">🔬 推演实验室</button>
       <button id="btn-open-takeover" class="btn" style="background: #d4380d;">🚨 人工接管工作台</button>
       <button id="btn-open-batch" class="btn" style="background: #1890ff;">🏷️ 标签与批量操作</button>
+      <button id="btn-open-diff-reports" class="btn" style="background: #13c2c2;">📊 版本差异报告</button>
     </div>
   </header>
 
@@ -859,6 +860,47 @@
           </div>
           <div id="rollback-records-list" style="max-height:400px;overflow-y:auto;"></div>
           <div id="rollback-record-detail" style="display:none;margin-top:12px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="diff-reports-modal" class="modal-overlay" style="display:none; z-index: 10004;">
+    <div class="modal" style="max-width: 1100px; max-height: 88vh;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #13c2c2 0%, #08979c 100%);">
+        <h2>📊 版本差异报告</h2>
+        <button id="btn-close-diff-reports" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body" id="diff-reports-body">
+        <div id="diff-step-list">
+          <div class="section-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <div style="display:flex;gap:10px;">
+              <input type="text" id="diff-search-machine" class="form-control" placeholder="按状态机名称筛选..." style="width:220px;">
+              <select id="diff-filter-trigger" class="form-control">
+                <option value="">全部触发方式</option>
+                <option value="publish">发布自动生成</option>
+                <option value="manual">手动对比</option>
+              </select>
+            </div>
+            <button id="btn-diff-refresh" class="btn btn-sm">🔄 刷新</button>
+          </div>
+          <div id="diff-reports-list" style="max-height:500px;overflow-y:auto;"></div>
+        </div>
+
+        <div id="diff-step-detail" style="display:none;">
+          <div class="section-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <button id="btn-diff-back" class="btn btn-sm">&larr; 返回列表</button>
+            <div id="diff-report-actions" style="display:flex;gap:8px;"></div>
+          </div>
+
+          <div id="diff-report-header" style="background:#f0f5ff;border:1px solid #adc6ff;border-radius:8px;padding:16px;margin-bottom:16px;"></div>
+
+          <div id="diff-report-summary" style="margin-bottom:16px;"></div>
+
+          <div id="diff-report-impact" style="margin-bottom:16px;"></div>
+
+          <h4 style="margin:16px 0 8px;">🔍 详细差异</h4>
+          <div id="diff-report-differences" style="max-height:350px;overflow-y:auto;"></div>
         </div>
       </div>
     </div>

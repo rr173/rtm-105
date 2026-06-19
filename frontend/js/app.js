@@ -158,6 +158,7 @@ class WorkflowApp {
     this.bindTemplateMarketEvents();
     this.bindMigrationEvents();
     this.bindRollbackEvents();
+    this.bindDiffReportsEvents();
     this.bindTakeoverEvents();
     this.bindBatchEvents();
   }
@@ -2282,6 +2283,320 @@ class WorkflowApp {
         </div>
       `;
     }).join('');
+  }
+
+  bindDiffReportsEvents() {
+    document.getElementById('btn-open-diff-reports').addEventListener('click', () => this.openDiffReportsModal());
+    document.getElementById('btn-close-diff-reports').addEventListener('click', () => this.closeDiffReportsModal());
+    document.getElementById('diff-reports-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'diff-reports-modal') this.closeDiffReportsModal();
+    });
+    document.getElementById('btn-diff-back').addEventListener('click', () => this.showDiffStep('list'));
+    document.getElementById('btn-diff-refresh').addEventListener('click', () => this.loadDiffReportsList());
+    document.getElementById('diff-search-machine').addEventListener('input', () => this.loadDiffReportsList());
+    document.getElementById('diff-filter-trigger').addEventListener('change', () => this.loadDiffReportsList());
+  }
+
+  async openDiffReportsModal() {
+    document.getElementById('diff-reports-modal').style.display = 'flex';
+    this.showDiffStep('list');
+    await this.loadDiffReportsList();
+  }
+
+  closeDiffReportsModal() {
+    document.getElementById('diff-reports-modal').style.display = 'none';
+    this.currentDiffReport = null;
+  }
+
+  showDiffStep(step) {
+    document.getElementById('diff-step-list').style.display = step === 'list' ? 'block' : 'none';
+    document.getElementById('diff-step-detail').style.display = step === 'detail' ? 'block' : 'none';
+  }
+
+  async loadDiffReportsList() {
+    try {
+      const search = document.getElementById('diff-search-machine').value.trim();
+      const trigger = document.getElementById('diff-filter-trigger').value;
+
+      let url = API_BASE + '/api/diff/reports';
+      const params = new URLSearchParams();
+      if (search) params.set('machineName', search);
+      if (trigger) params.set('triggeredBy', trigger);
+      if (params.toString()) url += '?' + params.toString();
+
+      const res = await fetch(url);
+      const reports = await res.json();
+
+      const container = document.getElementById('diff-reports-list');
+      if (!reports || reports.length === 0) {
+        container.innerHTML = '<div style="text-align:center;padding:40px;color:#8c8c8c;">暂无差异报告</div>';
+        return;
+      }
+
+      container.innerHTML = reports.map(r => {
+        const sum = r.summary || {};
+        const triggerLabel = r.triggeredBy === 'publish' ? '🚀 发布' : '🔧 手动';
+        const triggerStyle = r.triggeredBy === 'publish'
+          ? 'background:#e6f7ff;color:#1890ff;'
+          : 'background:#fff7e6;color:#fa8c16;';
+        const hasChanges = r.hasChanges;
+
+        return `
+          <div class="machine-version-item" style="cursor:pointer;padding:12px;border-left:3px solid ${hasChanges ? '#1890ff' : '#d9d9d9'};" data-diff-id="${r.id}">
+            <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:6px;">
+              <div>
+                <span style="font-weight:600;font-size:13px;">${escapeHtml(r.machineName)}</span>
+                <span style="${triggerStyle}padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px;">${triggerLabel}</span>
+                ${!hasChanges ? '<span style="background:#f0f0f0;color:#8c8c8c;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:4px;">无变化</span>' : ''}
+              </div>
+              <span style="font-size:11px;color:#8c8c8c;">${escapeHtml(new Date(r.createdAt).toLocaleString())}</span>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;font-size:12px;">
+              <span style="color:#52c41a;font-weight:600;">v${r.oldVersion}</span>
+              <span>→</span>
+              <span style="color:#1890ff;font-weight:600;">v${r.newVersion}</span>
+              ${hasChanges ? `
+                <span style="margin-left:12px;color:#595959;">
+                  状态: ${sum.stateChanged || 0} | 转换: ${sum.transitionChanged || 0} | 合规: ${sum.complianceChanged || 0} | 超时: ${sum.timeoutChanged || 0}
+                </span>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      container.querySelectorAll('[data-diff-id]').forEach(el => {
+        el.onclick = () => this.openDiffReportDetail(el.dataset.diffId);
+      });
+    } catch (e) {
+      toast('加载差异报告列表失败: ' + e.message, 'error');
+    }
+  }
+
+  async openDiffReportDetail(reportId) {
+    try {
+      const res = await fetch(API_BASE + '/api/diff/reports/' + encodeURIComponent(reportId) + '/with-impact');
+      const report = await res.json();
+      if (report.error) throw new Error(report.error);
+
+      this.currentDiffReport = report;
+      this.renderDiffReportDetail(report);
+      this.showDiffStep('detail');
+    } catch (e) {
+      toast('加载差异报告详情失败: ' + e.message, 'error');
+    }
+  }
+
+  renderDiffReportDetail(report) {
+    const header = document.getElementById('diff-report-header');
+    const triggerLabel = report.triggeredBy === 'publish' ? '发布自动生成' : '手动对比';
+    const sum = report.summary || {};
+
+    const group = (this.machineGroups || []).find(g => g.name === report.machineName);
+    const versions = group ? group.machines : [];
+    const newVersionInfo = versions.find(v => v.version === report.newVersion);
+    const isNewStillLatest = newVersionInfo && versions.length > 0 &&
+      newVersionInfo.version === Math.max(...versions.map(v => v.version));
+    const hasActiveInstances = newVersionInfo && newVersionInfo.activeInstances > 0;
+    const canRollback = isNewStillLatest && hasActiveInstances;
+
+    document.getElementById('diff-report-actions').innerHTML = canRollback
+      ? `<button class="btn btn-danger" id="btn-diff-rollback" style="font-weight:600;">⏪ 从 v${report.newVersion} 回滚到 v${report.oldVersion}</button>`
+      : `<button class="btn" disabled title="当前新版本无活跃实例或已不是最新版本">⏪ 回滚不可用</button>`;
+
+    if (canRollback) {
+      setTimeout(() => {
+        const btn = document.getElementById('btn-diff-rollback');
+        if (btn) btn.onclick = () => {
+          this.closeDiffReportsModal();
+          this.openRollbackModal(report.machineName, report.newVersion);
+          setTimeout(() => {
+            document.getElementById('rollback-target-version').value = String(report.oldVersion);
+            this.onRollbackTargetChange(String(report.oldVersion));
+          }, 50);
+        };
+      }, 0);
+    }
+
+    header.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:12px;">
+        <div>
+          <div style="font-size:18px;font-weight:600;margin-bottom:6px;">${escapeHtml(report.machineName)}</div>
+          <div style="font-size:13px;color:#8c8c8c;">
+            生成时间: ${escapeHtml(new Date(report.createdAt).toLocaleString())} · ${triggerLabel}
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <div style="display:flex;flex-direction:column;align-items:flex-end;">
+            <span style="font-size:11px;color:#52c41a;">旧版本</span>
+            <span style="font-weight:700;font-size:20px;color:#52c41a;">v${report.oldVersion}</span>
+          </div>
+          <span style="font-size:24px;color:#bfbfbf;">→</span>
+          <div style="display:flex;flex-direction:column;align-items:flex-start;">
+            <span style="font-size:11px;color:#1890ff;">新版本</span>
+            <span style="font-weight:700;font-size:20px;color:#1890ff;">v${report.newVersion}</span>
+          </div>
+        </div>
+      </div>
+      ${!report.hasChanges ? '<div style="background:#f6ffed;border:1px solid #b7eb8f;color:#52c41a;padding:8px 12px;border-radius:6px;font-size:12px;">✅ 两个版本无实质性差异</div>' : ''}
+    `;
+
+    const summary = document.getElementById('diff-report-summary');
+    if (report.hasChanges) {
+      summary.innerHTML = `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;">
+          <div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;padding:10px;text-align:center;">
+            <div style="font-size:11px;color:#52c41a;">状态变化</div>
+            <div style="font-size:22px;font-weight:700;color:#389e0d;">${sum.stateChanged || 0}</div>
+          </div>
+          <div style="background:#e6f7ff;border:1px solid #91d5ff;border-radius:6px;padding:10px;text-align:center;">
+            <div style="font-size:11px;color:#1890ff;">转换变化</div>
+            <div style="font-size:22px;font-weight:700;color:#096dd9;">${sum.transitionChanged || 0}</div>
+          </div>
+          <div style="background:#fff7e6;border:1px solid #ffd591;border-radius:6px;padding:10px;text-align:center;">
+            <div style="font-size:11px;color:#fa8c16;">合规策略变化</div>
+            <div style="font-size:22px;font-weight:700;color:#d46b08;">${sum.complianceChanged || 0}</div>
+          </div>
+          <div style="background:#fff1f0;border:1px solid #ffa39e;border-radius:6px;padding:10px;text-align:center;">
+            <div style="font-size:11px;color:#ff4d4f;">超时配置变化</div>
+            <div style="font-size:22px;font-weight:700;color:#cf1322;">${sum.timeoutChanged || 0}</div>
+          </div>
+        </div>
+      `;
+    } else {
+      summary.innerHTML = '';
+    }
+
+    const impact = report.impact;
+    const impactDiv = document.getElementById('diff-report-impact');
+    if (impact && impact.stats && impact.stats.total > 0) {
+      const stats = impact.stats;
+      impactDiv.innerHTML = `
+        <h4 style="margin:0 0 10px;">🎯 影响评估 · 共 ${stats.total} 个活跃实例</h4>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:12px;">
+          <div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;padding:10px;text-align:center;">
+            <div style="font-size:11px;">安全实例</div>
+            <div style="font-size:24px;font-weight:700;color:#389e0d;">${stats.safe || 0}</div>
+            <div style="font-size:10px;color:#52c41a;">可自动迁移</div>
+          </div>
+          <div style="background:#fff7e6;border:1px solid #ffd591;border-radius:6px;padding:10px;text-align:center;">
+            <div style="font-size:11px;">需关注实例</div>
+            <div style="font-size:24px;font-weight:700;color:#d46b08;">${stats.attention || 0}</div>
+            <div style="font-size:10px;color:#fa8c16;">可自动迁移，注意审查</div>
+          </div>
+          <div style="background:#fff1f0;border:1px solid #ffa39e;border-radius:6px;padding:10px;text-align:center;">
+            <div style="font-size:11px;">危险实例</div>
+            <div style="font-size:24px;font-weight:700;color:#cf1322;">${stats.dangerous || 0}</div>
+            <div style="font-size:10px;color:#ff4d4f;">跳过，需手动处理</div>
+          </div>
+        </div>
+        <div style="max-height:200px;overflow-y:auto;border:1px solid #f0f0f0;border-radius:6px;padding:8px;">
+          ${impact.instances.map(inst => {
+            const badge = inst.riskLevel === 'safe'
+              ? '<span style="background:#f6ffed;color:#52c41a;padding:2px 6px;border-radius:3px;font-size:11px;">安全</span>'
+              : inst.riskLevel === 'attention'
+              ? '<span style="background:#fff7e6;color:#fa8c16;padding:2px 6px;border-radius:3px;font-size:11px;">需关注</span>'
+              : '<span style="background:#fff1f0;color:#ff4d4f;padding:2px 6px;border-radius:3px;font-size:11px;">危险</span>';
+            return `
+              <div style="padding:6px 8px;border-bottom:1px solid #f5f5f5;font-size:12px;display:flex;justify-content:space-between;">
+                <span>
+                  <code style="background:#f5f5f5;padding:1px 4px;border-radius:3px;">${escapeHtml(inst.instanceId)}</code>
+                  <span style="color:#8c8c8c;margin-left:6px;">状态: ${escapeHtml(inst.currentStateId || '-')}</span>
+                </span>
+                ${badge}
+              </div>
+              ${inst.reasons && inst.reasons.length > 0 ? `
+                <div style="padding:0 8px 6px 20px;font-size:11px;color:#8c8c8c;">
+                  ${inst.reasons.map(r => `• ${escapeHtml(r)}`).join('<br>')}
+                </div>
+              ` : ''}
+            `;
+          }).join('')}
+        </div>
+      `;
+    } else {
+      impactDiv.innerHTML = `
+        <div style="background:#fafafa;border:1px solid #f0f0f0;border-radius:6px;padding:12px;font-size:12px;color:#8c8c8c;">
+          ℹ️ 该版本对比暂无影响评估数据（新版本可能还没有活跃实例）
+          <button class="btn btn-sm" style="margin-left:12px;" id="btn-gen-impact">生成评估</button>
+        </div>
+      `;
+      setTimeout(() => {
+        const btn = document.getElementById('btn-gen-impact');
+        if (btn) btn.onclick = async () => {
+          try {
+            btn.disabled = true;
+            btn.textContent = '评估中...';
+            const res = await fetch(API_BASE + '/api/diff/reports/' + encodeURIComponent(report.id) + '/impact', {
+              method: 'POST'
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            await this.openDiffReportDetail(report.id);
+          } catch (e) {
+            toast('生成评估失败: ' + e.message, 'error');
+          }
+        };
+      }, 0);
+    }
+
+    const diffs = document.getElementById('diff-report-differences');
+    const diffData = report.diffData;
+    if (!diffData || !diffData.differences || diffData.differences.length === 0) {
+      diffs.innerHTML = '<div style="text-align:center;padding:20px;color:#8c8c8c;">无差异项</div>';
+      return;
+    }
+
+    diffs.innerHTML = diffData.differences.map(d => {
+      const typeLabel = d.type === 'state' ? '状态' : d.type === 'transition' ? '转换' : d.type === 'compliance' ? '合规策略' : d.type === 'timeout' ? '超时配置' : '其他';
+      const typeColor = d.type === 'state' ? '#52c41a' : d.type === 'transition' ? '#1890ff' : d.type === 'compliance' ? '#fa8c16' : '#ff4d4f';
+
+      let sideA = '';
+      let sideB = '';
+      if (d.operation === 'added') {
+        sideA = '<em style="color:#bfbfbf;">新增前无</em>';
+        sideB = this.renderDiffDiffValue(d.newValue);
+      } else if (d.operation === 'removed') {
+        sideA = this.renderDiffDiffValue(d.oldValue);
+        sideB = '<em style="color:#bfbfbf;">已删除</em>';
+      } else {
+        sideA = this.renderDiffDiffValue(d.oldValue);
+        sideB = this.renderDiffDiffValue(d.newValue);
+      }
+
+      return `
+        <div style="border:1px solid #f0f0f0;border-radius:6px;padding:12px;margin-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-weight:600;font-size:13px;">
+              <span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${typeColor}15;color:${typeColor};margin-right:6px;">${typeLabel}</span>
+              ${escapeHtml(d.name || d.field || '-')}
+            </span>
+            <span style="font-size:11px;color:#8c8c8c;">
+              ${d.operation === 'added' ? '新增' : d.operation === 'removed' ? '删除' : '修改'}
+            </span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 40px 1fr;gap:10px;font-size:12px;">
+            <div style="background:#f6ffed;border:1px solid #b7eb8f;border-radius:4px;padding:8px;overflow:auto;max-height:120px;">
+              <div style="font-weight:600;color:#52c41a;margin-bottom:4px;">v${report.oldVersion}</div>
+              ${sideA}
+            </div>
+            <div style="display:flex;align-items:center;justify-content:center;font-size:18px;color:#bfbfbf;">→</div>
+            <div style="background:#e6f7ff;border:1px solid #91d5ff;border-radius:4px;padding:8px;overflow:auto;max-height:120px;">
+              <div style="font-weight:600;color:#1890ff;margin-bottom:4px;">v${report.newVersion}</div>
+              ${sideB}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  renderDiffDiffValue(val) {
+    if (val === undefined || val === null) return '<em style="color:#bfbfbf;">空</em>';
+    if (typeof val === 'object') {
+      return `<pre style="margin:0;font-size:11px;white-space:pre-wrap;">${escapeHtml(JSON.stringify(val, null, 2))}</pre>`;
+    }
+    return escapeHtml(String(val));
   }
 }
 

@@ -4,7 +4,6 @@ const { getMachineById, getMachineVersionsByName } = require('./version-migratio
 const { assessInstanceRisk } = require('./impact-assessment');
 const { RISK_LEVEL } = require('./version-diff-engine');
 const { clearInstanceTimeout, scheduleTimeout } = require('./timeout-manager');
-const { getPoliciesByMachineId, addPolicy } = require('./compliance-engine');
 const { getLinksByInstanceId } = require('./cascade-engine');
 
 const activeRollbacks = new Map();
@@ -73,12 +72,6 @@ async function executeRollback({ machineName, targetVersion, operatorId, operato
       'UPDATE version_rollback_records SET total_instances = ? WHERE id = ?',
       [instances.length, rollbackId]
     );
-
-    const newPolicies = await getPoliciesByMachineId(currentMachine.id, { includeDisabled: true });
-    const oldPolicyNames = new Set(
-      (await getPoliciesByMachineId(targetMachine.id, { includeDisabled: true })).map(p => p.name)
-    );
-    const policiesToSync = newPolicies.filter(p => !oldPolicyNames.has(p.name));
 
     let successCount = 0;
     let failedCount = 0;
@@ -266,21 +259,6 @@ async function executeRollback({ machineName, targetVersion, operatorId, operato
            assessment.riskLevel, JSON.stringify(assessment.reasons),
            ROLLBACK_ACTION.FAILED, e.message, now]
         );
-      }
-    }
-
-    for (const policy of policiesToSync) {
-      try {
-        await addPolicy({
-          machineId: targetMachine.id,
-          name: policy.name,
-          description: policy.description,
-          type: policy.type,
-          config: policy.config,
-          enabled: policy.enabled
-        });
-      } catch (e) {
-        console.error(`[Rollback] Failed to sync policy "${policy.name}" to target machine:`, e.message);
       }
     }
 
