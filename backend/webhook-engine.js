@@ -152,6 +152,18 @@ async function addWebhookConfig(config) {
     throw new Error('machineId, transitionId, name, and url are required');
   }
 
+  const machineRow = await get('SELECT * FROM machines WHERE id = ?', [machineId]);
+  if (!machineRow) {
+    throw new Error('Machine not found');
+  }
+
+  const definition = JSON.parse(machineRow.definition);
+  const transitions = definition.transitions || [];
+  const transitionExists = transitions.some(t => t.id === transitionId);
+  if (!transitionExists) {
+    throw new Error(`Transition ID ${transitionId} does not exist in the state machine definition`);
+  }
+
   const id = uuidv4();
   const now = new Date().toISOString();
 
@@ -240,13 +252,6 @@ async function deleteWebhookConfig(configId) {
   const existing = await getWebhookConfigById(configId);
   if (!existing) return false;
 
-  if (pendingRetryTimers.has(configId)) {
-    const timers = pendingRetryTimers.get(configId);
-    for (const t of timers.values()) clearTimeout(t);
-    pendingRetryTimers.delete(configId);
-  }
-
-  circuitStates.delete(configId);
   await run('DELETE FROM webhook_configs WHERE id = ?', [configId]);
   return true;
 }
@@ -463,7 +468,6 @@ function scheduleRetry(config, deliveryId, requestPayload, retryCount, originalC
   const delay = effectiveConfig.retryIntervalMs;
 
   const timer = setTimeout(async () => {
-    if (!pendingRetryTimers.has(effectiveConfig.id)) return;
     pendingRetryTimers.get(effectiveConfig.id)?.delete(deliveryId);
 
     if (checkCircuitBreaker(effectiveConfig.id, effectiveConfig.circuitBreakerResetMs)) {
