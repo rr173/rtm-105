@@ -2,41 +2,61 @@ const { run, get, all } = require('./db');
 const { getMachineById, getMachineVersionsByName } = require('./version-migration');
 const { diffStates, diffTransitions, RISK_LEVEL, deepEqual } = require('./version-diff-engine');
 
-function buildStateTransitionMap(definition) {
-  const map = new Map();
-  for (const state of definition.states) {
-    const outgoing = definition.transitions.filter(t => t.sourceStateId === state.id);
-    map.set(state.id, {
-      state,
-      outgoingTransitions: outgoing
-    });
+function buildStateIdNameMaps(oldDef, newDef) {
+  const oldIdToName = new Map();
+  const oldNameToId = new Map();
+  const newIdToName = new Map();
+  const newNameToId = new Map();
+
+  for (const s of oldDef.states) {
+    oldIdToName.set(s.id, s.name);
+    if (s.name) oldNameToId.set(s.name, s.id);
   }
-  return map;
+  for (const s of newDef.states) {
+    newIdToName.set(s.id, s.name);
+    if (s.name) newNameToId.set(s.name, s.id);
+  }
+  return { oldIdToName, oldNameToId, newIdToName, newNameToId };
 }
 
-function transitionsEqual(transitionsA, transitionsB) {
+function transitionsSemanticEqual(transitionsA, transitionsB, oldIdToName, newIdToName, newNameToId) {
   if (transitionsA.length !== transitionsB.length) return false;
-  
-  const keyA = transitionsA
-    .map(t => `${t.sourceStateId}:${t.targetStateId}:${t.event}:${t.guard || ''}`)
-    .sort()
-    .join('|');
-  
-  const keyB = transitionsB
-    .map(t => `${t.sourceStateId}:${t.targetStateId}:${t.event}:${t.guard || ''}`)
-    .sort()
-    .join('|');
-  
+
+  const normalize = (t, side) => {
+    const idToName = side === 'old' ? oldIdToName : newIdToName;
+    const srcName = idToName.get(t.sourceStateId) || t.sourceStateId;
+    const tgtName = idToName.get(t.targetStateId) || t.targetStateId;
+    return `${srcName}:${tgtName}:${t.event}:${t.guard || ''}`;
+  };
+
+  const keyA = transitionsA.map(t => normalize(t, 'old')).sort().join('|');
+  const keyB = transitionsB.map(t => normalize(t, 'new')).sort().join('|');
   return keyA === keyB;
+}
+
+function findStateInNewDef(oldState, newDefinition) {
+  if (!oldState) return { state: null, matchedBy: null };
+
+  let newState = newDefinition.states.find(s => s.id === oldState.id);
+  if (newState) return { state: newState, matchedBy: 'id' };
+
+  if (oldState.name) {
+    newState = newDefinition.states.find(s => s.name === oldState.name);
+    if (newState) return { state: newState, matchedBy: 'name' };
+  }
+
+  return { state: null, matchedBy: null };
 }
 
 function assessInstanceRisk(instanceRow, oldDefinition, newDefinition) {
   const currentStateId = instanceRow.current_state_id;
   const context = instanceRow.context_data ? JSON.parse(instanceRow.context_data) : {};
-  
+
   const oldStateInfo = oldDefinition.states.find(s => s.id === currentStateId);
-  const newStateInfo = newDefinition.states.find(s => s.id === currentStateId);
-  
+  const { state: newStateInfo, matchedBy } = findStateInNewDef(oldStateInfo, newDefinition);
+
+  const { oldIdToName, newIdToName } = buildStateIdNameMaps(oldDefinition, newDefinition);
+
   const result = {
     instanceId: instanceRow.id,
     currentStateId,
@@ -45,49 +65,66 @@ function assessInstanceRisk(instanceRow, oldDefinition, newDefinition) {
     reasons: [],
     context
   };
-  
+
   if (!newStateInfo) {
     result.riskLevel = RISK_LEVEL.DANGEROUS;
     result.reasons.push(`当前状态 "${oldStateInfo ? oldStateInfo.name : currentStateId}" 在新版本中已被删除`);
-    
-    const newStateByName = newDefinition.states.find(s => s.name === (oldStateInfo ? oldStateInfo.name : ''));
-    if (newStateByName) {
-      result.reasons.push(`提示：新版本中存在同名状态 "${newStateByName.name}"，但ID不同，可能需要手动映射`);
-      result.suggestedStateId = newStateByName.id;
-      result.suggestedStateName = newStateByName.name;
+
+    if (oldStateInfo && oldStateInfo.name) {
+      const newStateByName = newDefinition.states.find(s => s.name === oldStateInfo.name);
+      if (newStateByName) {
+        result.reasons.push(`提示：新版本中存在同名状态 "${newStateByName.name}"，但系统无法确认是否为同一状态，请手动确认`);
+        result.suggestedStateId = newStateByName.id;
+        result.suggestedStateName = newStateByName.name;
+      }
     }
-    
     return result;
   }
-  
+
+  if (matchedBy === 'name') {
+    result.currentStateMappedId = newStateInfo.id;
+    result.reasons.push(`状态ID已变更（通过名称 "${newStateInfo.name}" 匹配到新版本状态）`);
+  }
+
+  const effectiveNewStateId = newStateInfo.id;
+
   const oldOutgoing = oldDefinition.transitions.filter(t => t.sourceStateId === currentStateId);
-  const newOutgoing = newDefinition.transitions.filter(t => t.sourceStateId === currentStateId);
-  
-  const hasTransitionChanges = !transitionsEqual(oldOutgoing, newOutgoing);
-  
+  const newOutgoing = newDefinition.transitions.filter(t => t.sourceStateId === effectiveNewStateId);
+
+  const hasTransitionChanges = !transitionsSemanticEqual(
+    oldOutgoing, newOutgoing, oldIdToName, newIdToName
+  );
+
   if (hasTransitionChanges) {
     result.riskLevel = RISK_LEVEL.ATTENTION;
-    
+
     const oldEvents = new Set(oldOutgoing.map(t => t.event));
     const newEvents = new Set(newOutgoing.map(t => t.event));
-    
+
     const addedEvents = [...newEvents].filter(e => !oldEvents.has(e));
     const removedEvents = [...oldEvents].filter(e => !newEvents.has(e));
-    
+
     if (addedEvents.length > 0) {
       result.reasons.push(`新增可触发事件: ${addedEvents.join(', ')}`);
     }
     if (removedEvents.length > 0) {
       result.reasons.push(`移除了原有事件: ${removedEvents.join(', ')}`);
     }
-    
+
     const guardChanges = [];
     for (const oldT of oldOutgoing) {
-      const newT = newOutgoing.find(t => t.event === oldT.event && t.targetStateId === oldT.targetStateId);
+      const oldTgtName = oldIdToName.get(oldT.targetStateId);
+      const newT = newOutgoing.find(t => {
+        if (t.event !== oldT.event) return false;
+        if (t.targetStateId === oldT.targetStateId) return true;
+        const newTgtName = newIdToName.get(t.targetStateId);
+        return oldTgtName && newTgtName === oldTgtName;
+      });
       if (newT && (oldT.guard || '') !== (newT.guard || '')) {
         guardChanges.push({
           event: oldT.event,
-          targetStateId: oldT.targetStateId,
+          oldTarget: oldTgtName || oldT.targetStateId,
+          newTarget: newIdToName.get(newT.targetStateId) || newT.targetStateId,
           oldGuard: oldT.guard || '',
           newGuard: newT.guard || ''
         });
@@ -97,47 +134,56 @@ function assessInstanceRisk(instanceRow, oldDefinition, newDefinition) {
       result.reasons.push(`守卫条件有变化，涉及 ${guardChanges.length} 个转换`);
       result.guardChanges = guardChanges;
     }
-    
+
     const targetChanges = [];
     for (const oldT of oldOutgoing) {
-      const newT = newOutgoing.find(t => t.event === oldT.event);
-      if (newT && oldT.targetStateId !== newT.targetStateId) {
-        const oldTarget = oldDefinition.states.find(s => s.id === oldT.targetStateId);
-        const newTarget = newDefinition.states.find(s => s.id === newT.targetStateId);
+      for (const newT of newOutgoing) {
+        if (newT.event !== oldT.event) continue;
+        if (oldT.targetStateId === newT.targetStateId) continue;
+        const oldTgtName = oldIdToName.get(oldT.targetStateId);
+        const newTgtName = newIdToName.get(newT.targetStateId);
+        if (oldTgtName === newTgtName) continue;
         targetChanges.push({
           event: oldT.event,
-          oldTarget: oldTarget ? oldTarget.name : oldT.targetStateId,
-          newTarget: newTarget ? newTarget.name : newT.targetStateId
+          oldTarget: oldTgtName || oldT.targetStateId,
+          newTarget: newTgtName || newT.targetStateId
         });
       }
     }
-    if (targetChanges.length > 0) {
+    const uniqueTargetChanges = targetChanges.filter(
+      (tc, i, arr) => i === arr.findIndex(t => t.event === tc.event && t.oldTarget === tc.oldTarget && t.newTarget === tc.newTarget)
+    );
+    if (uniqueTargetChanges.length > 0) {
       result.reasons.push(`部分事件的目标状态有变化`);
-      result.targetChanges = targetChanges;
+      result.targetChanges = uniqueTargetChanges;
     }
-    
-    if (!addedEvents.length && !removedEvents.length && !guardChanges.length && !targetChanges.length) {
+
+    if (!addedEvents.length && !removedEvents.length && !guardChanges.length && !uniqueTargetChanges.length) {
       result.reasons.push('出向转换有变化');
     }
   } else {
     result.riskLevel = RISK_LEVEL.SAFE;
-    result.reasons.push('当前状态存在且出向转换无变化，迁移后行为一致');
+    if (matchedBy === 'name') {
+      result.reasons.push('当前状态通过名称匹配存在，且出向转换语义无变化，迁移后行为一致');
+    } else {
+      result.reasons.push('当前状态存在且出向转换无变化，迁移后行为一致');
+    }
   }
-  
+
   if (newStateInfo.isFinal && !oldStateInfo.isFinal) {
     if (result.riskLevel === RISK_LEVEL.SAFE) {
       result.riskLevel = RISK_LEVEL.ATTENTION;
     }
     result.reasons.push('状态在新版本中变为终态，迁移后实例将结束');
   }
-  
+
   if (!newStateInfo.isFinal && oldStateInfo.isFinal) {
     if (result.riskLevel === RISK_LEVEL.SAFE) {
       result.riskLevel = RISK_LEVEL.ATTENTION;
     }
     result.reasons.push('状态在新版本中不再是终态');
   }
-  
+
   return result;
 }
 
@@ -289,6 +335,5 @@ module.exports = {
   assessInstanceRisk,
   assessMigrationImpact,
   assessImpactByDiff,
-  buildStateTransitionMap,
-  transitionsEqual
+  transitionsSemanticEqual
 };
