@@ -2,6 +2,7 @@ const { run, get, all } = require('./db');
 const { v4: uuidv4 } = require('uuid');
 const { recordStateDuration } = require('./metrics');
 const { addPolicy, getPoliciesByMachineId } = require('./compliance-engine');
+const { createLink, getLinksByInstanceId, LINK_TYPE } = require('./cascade-engine');
 
 async function createInstanceWithHistory(machineId, states, path, baseTime) {
   const sMap = new Map();
@@ -316,4 +317,153 @@ async function seedDemoData() {
   }
 }
 
-module.exports = { seedDemoData };
+async function seedCascadeDemoData() {
+  const orderMachineRow = await get('SELECT * FROM machines WHERE name = ? ORDER BY version DESC LIMIT 1', ['订单审批']);
+  if (!orderMachineRow) {
+    console.log('[Cascade Demo] No 订单审批 machine found, skipping cascade demo data.');
+    return;
+  }
+
+  const orderMachine = {
+    id: orderMachineRow.id,
+    definition: JSON.parse(orderMachineRow.definition)
+  };
+
+  const pendingState = orderMachine.definition.states.find(s => s.name === '待审批');
+  if (!pendingState) {
+    console.log('[Cascade Demo] No 待审批 state found, skipping cascade demo data.');
+    return;
+  }
+
+  const approveState = orderMachine.definition.states.find(s => s.name === '已批准');
+  const rejectState = orderMachine.definition.states.find(s => s.name === '已拒绝');
+
+  if (!approveState || !rejectState) {
+    console.log('[Cascade Demo] No 已批准 or 已拒绝 state found, skipping cascade demo data.');
+    return;
+  }
+
+  const existingLinks = await all(
+    `SELECT il.* FROM instance_links il
+     JOIN instances i ON i.id = il.source_instance_id OR i.id = il.target_instance_id
+     WHERE i.machine_id = ? AND il.link_type = ?
+     LIMIT 1`,
+    [orderMachine.id, LINK_TYPE.PARENT_CHILD]
+  );
+
+  if (existingLinks.length > 0) {
+    console.log('[Cascade Demo] Cascade demo links already exist, skipping.');
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const initialState = orderMachine.definition.states.find(s => s.isInitial);
+  if (!initialState) {
+    console.log('[Cascade Demo] No initial state found, skipping cascade demo data.');
+    return;
+  }
+
+  async function createCascadeDemoInstance(orderId, context) {
+    const id = uuidv4();
+    await run(
+      'INSERT INTO instances (id, machine_id, current_state_id, context_data, created_at, is_final, entered_state_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, orderMachine.id, initialState.id, JSON.stringify(context || {}), now, initialState.isFinal ? 1 : 0, now]
+    );
+
+    const transitionId = uuidv4();
+    await run(
+      'INSERT INTO transitions (id, instance_id, from_state_id, to_state_id, event_name, payload_snapshot, created_at, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        transitionId,
+        id,
+        initialState.id,
+        pendingState.id,
+        'submit',
+        JSON.stringify(context || {}),
+        now,
+        'user'
+      ]
+    );
+
+    await run(
+      'UPDATE instances SET current_state_id = ?, entered_state_at = ? WHERE id = ?',
+      [pendingState.id, now, id]
+    );
+
+    await recordStateDuration(id, orderMachine.id, initialState.id, now, now);
+    console.log(`[Cascade Demo] Created instance ${orderId}: ${id}`);
+    return id;
+  }
+
+  try {
+    const mainOrderId = await createCascadeDemoInstance('主订单-CASCADE-DEMO', {
+      orderId: 'ORD-MAIN-CASCADE-001',
+      orderType: 'main',
+      amount: 3000,
+      description: '主订单（级联演示用）'
+    });
+
+    const subOrderAId = await createCascadeDemoInstance('子订单A-CASCADE-DEMO', {
+      orderId: 'ORD-SUB-A-CASCADE-001',
+      orderType: 'sub',
+      parentOrderId: 'ORD-MAIN-CASCADE-001',
+      amount: 1500,
+      description: '子订单A（级联演示用）'
+    });
+
+    const subOrderBId = await createCascadeDemoInstance('子订单B-CASCADE-DEMO', {
+      orderId: 'ORD-SUB-B-CASCADE-001',
+      orderType: 'sub',
+      parentOrderId: 'ORD-MAIN-CASCADE-001',
+      amount: 1500,
+      description: '子订单B（级联演示用）'
+    });
+
+    const triggerRules = [
+      {
+        sourceEvent: 'approve',
+        targetStateId: approveState.id,
+        targetEvent: 'approve',
+        payload: { reason: '由主订单批准自动触发', cascaded: true }
+      },
+      {
+        sourceEvent: 'reject',
+        targetStateId: rejectState.id,
+        targetEvent: 'reject',
+        payload: { reason: '由主订单拒绝自动触发', cascaded: true }
+      }
+    ];
+
+    const link1 = await createLink({
+      sourceInstanceId: mainOrderId,
+      targetInstanceId: subOrderAId,
+      linkType: LINK_TYPE.PARENT_CHILD,
+      triggerRules
+    });
+    console.log(`[Cascade Demo] Created parent_child link (main -> subA): ${link1.id}`);
+
+    const link2 = await createLink({
+      sourceInstanceId: mainOrderId,
+      targetInstanceId: subOrderBId,
+      linkType: LINK_TYPE.PARENT_CHILD,
+      triggerRules
+    });
+    console.log(`[Cascade Demo] Created parent_child link (main -> subB): ${link2.id}`);
+
+    console.log('[Cascade Demo] Cascade demo data seeded successfully:');
+    console.log(`  - 主订单: ${mainOrderId}`);
+    console.log(`  - 子订单A: ${subOrderAId}`);
+    console.log(`  - 子订单B: ${subOrderBId}`);
+    console.log(`  - 关联1 (主->A): ${link1.id}`);
+    console.log(`  - 关联2 (主->B): ${link2.id}`);
+    console.log('  演示: 向主订单发送approve或reject事件,将自动级联触发子订单A和B的对应事件');
+  } catch (e) {
+    if (e.message === 'Cycle detected in instance links' && e.cyclePath) {
+      console.error('[Cascade Demo] Cycle detected while creating demo links:', e.cyclePath);
+    } else {
+      console.error('[Cascade Demo] Failed to seed cascade demo data:', e.message);
+    }
+  }
+}
+
+module.exports = { seedDemoData, seedCascadeDemoData };

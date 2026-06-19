@@ -118,6 +118,62 @@ async function migrateDB() {
     await run('CREATE INDEX idx_batch_results_instance ON batch_operation_results(instance_id)');
     console.log('Migrated: created batch_operation_results table');
   }
+
+  const hasCascadeDetail = await columnExists('transitions', 'cascade_detail');
+  if (!hasCascadeDetail) {
+    await run('ALTER TABLE transitions ADD COLUMN cascade_detail TEXT');
+    console.log('Migrated: added transitions.cascade_detail');
+  }
+
+  const hasInstanceLinksTable = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name='instance_links'`);
+  if (!hasInstanceLinksTable) {
+    await run(`
+      CREATE TABLE instance_links (
+        id TEXT PRIMARY KEY,
+        source_instance_id TEXT NOT NULL,
+        target_instance_id TEXT NOT NULL,
+        link_type TEXT NOT NULL,
+        trigger_rules_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        source_machine_id TEXT NOT NULL,
+        target_machine_id TEXT NOT NULL,
+        FOREIGN KEY (source_instance_id) REFERENCES instances(id),
+        FOREIGN KEY (target_instance_id) REFERENCES instances(id)
+      )
+    `);
+    await run('CREATE INDEX idx_instance_links_source ON instance_links(source_instance_id)');
+    await run('CREATE INDEX idx_instance_links_target ON instance_links(target_instance_id)');
+    await run('CREATE INDEX idx_instance_links_source_machine ON instance_links(source_machine_id)');
+    await run('CREATE INDEX idx_instance_links_target_machine ON instance_links(target_machine_id)');
+    await run('CREATE INDEX idx_instance_links_status ON instance_links(status)');
+    await run('CREATE UNIQUE INDEX idx_instance_links_unique ON instance_links(source_instance_id, target_instance_id, link_type)');
+    console.log('Migrated: created instance_links table');
+  }
+
+  const hasLinkSkipLogsTable = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name='instance_link_skip_logs'`);
+  if (!hasLinkSkipLogsTable) {
+    await run(`
+      CREATE TABLE instance_link_skip_logs (
+        id TEXT PRIMARY KEY,
+        link_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        target_instance_id TEXT NOT NULL,
+        source_event TEXT NOT NULL,
+        target_event TEXT NOT NULL,
+        source_state_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (link_id) REFERENCES instance_links(id)
+      )
+    `);
+    await run('CREATE INDEX idx_link_skip_logs_link ON instance_link_skip_logs(link_id)');
+    await run('CREATE INDEX idx_link_skip_logs_source ON instance_link_skip_logs(source_instance_id)');
+    await run('CREATE INDEX idx_link_skip_logs_target ON instance_link_skip_logs(target_instance_id)');
+    await run('CREATE INDEX idx_link_skip_logs_created ON instance_link_skip_logs(created_at)');
+    console.log('Migrated: created instance_link_skip_logs table');
+  }
 }
 
 function initDB() {
@@ -152,6 +208,7 @@ function initDB() {
           payload_snapshot TEXT,
           created_at TEXT NOT NULL,
           triggered_by TEXT NOT NULL DEFAULT "user",
+          cascade_detail TEXT,
           FOREIGN KEY (instance_id) REFERENCES instances(id)
         );
 
@@ -369,6 +426,46 @@ function initDB() {
         CREATE INDEX IF NOT EXISTS idx_decision_traces_machine ON decision_traces(machine_id);
         CREATE INDEX IF NOT EXISTS idx_decision_traces_created ON decision_traces(created_at);
         CREATE INDEX IF NOT EXISTS idx_decision_traces_result ON decision_traces(decision_result);
+
+        CREATE TABLE IF NOT EXISTS instance_links (
+          id TEXT PRIMARY KEY,
+          source_instance_id TEXT NOT NULL,
+          target_instance_id TEXT NOT NULL,
+          link_type TEXT NOT NULL,
+          trigger_rules_json TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          source_machine_id TEXT NOT NULL,
+          target_machine_id TEXT NOT NULL,
+          FOREIGN KEY (source_instance_id) REFERENCES instances(id),
+          FOREIGN KEY (target_instance_id) REFERENCES instances(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_instance_links_source ON instance_links(source_instance_id);
+        CREATE INDEX IF NOT EXISTS idx_instance_links_target ON instance_links(target_instance_id);
+        CREATE INDEX IF NOT EXISTS idx_instance_links_source_machine ON instance_links(source_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_instance_links_target_machine ON instance_links(target_machine_id);
+        CREATE INDEX IF NOT EXISTS idx_instance_links_status ON instance_links(status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_instance_links_unique ON instance_links(source_instance_id, target_instance_id, link_type);
+
+        CREATE TABLE IF NOT EXISTS instance_link_skip_logs (
+          id TEXT PRIMARY KEY,
+          link_id TEXT NOT NULL,
+          source_instance_id TEXT NOT NULL,
+          target_instance_id TEXT NOT NULL,
+          source_event TEXT NOT NULL,
+          target_event TEXT NOT NULL,
+          source_state_id TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (link_id) REFERENCES instance_links(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_link_skip_logs_link ON instance_link_skip_logs(link_id);
+        CREATE INDEX IF NOT EXISTS idx_link_skip_logs_source ON instance_link_skip_logs(source_instance_id);
+        CREATE INDEX IF NOT EXISTS idx_link_skip_logs_target ON instance_link_skip_logs(target_instance_id);
+        CREATE INDEX IF NOT EXISTS idx_link_skip_logs_created ON instance_link_skip_logs(created_at);
       `, (err) => {
         if (err) return reject(err);
         migrateDB().then(resolve).catch(reject);

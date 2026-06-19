@@ -5,7 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 const WebSocket = require('ws');
 const { run, get, all, initDB } = require('./db');
 const { evaluateGuard } = require('./guard');
-const { seedDemoData } = require('./seed');
+const { seedDemoData, seedCascadeDemoData } = require('./seed');
 const {
   parseTimeFilter,
   getStateHeatmap,
@@ -139,6 +139,21 @@ const {
   resetCircuitBreakerManually,
   seedDemoWebhookData
 } = require('./webhook-engine');
+const {
+  LINK_STATUS,
+  LINK_TYPE,
+  MAX_CASCADE_DEPTH,
+  createLink,
+  getLinkById,
+  getLinksByMachineId,
+  getLinksByInstanceId,
+  pauseLink,
+  resumeLink,
+  deleteLink,
+  processCascade,
+  getSkipLogsByLinkId,
+  getCascadeHistoryByLinkId
+} = require('./cascade-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -414,7 +429,8 @@ app.get('/api/instances/:id', async (req, res) => {
       event: h.event_name,
       payload: h.payload_snapshot ? JSON.parse(h.payload_snapshot) : null,
       createdAt: h.created_at,
-      triggeredBy: h.triggered_by || 'user'
+      triggeredBy: h.triggered_by || 'user',
+      cascadeDetail: h.cascade_detail ? JSON.parse(h.cascade_detail) : null
     }));
 
     const freezeInfo = await getFreezeInfo(req.params.id);
@@ -713,6 +729,21 @@ app.post('/api/instances/:id/send', async (req, res) => {
       console.error('[Webhook] Error triggering transition webhooks (async):', webhookErr);
     });
 
+    let cascadeResult = null;
+    try {
+      cascadeResult = await processCascade({
+        sourceInstanceId: row.id,
+        sourceEvent: event,
+        sourceToStateId: targetState.id,
+        payload: payload || {},
+        depth: 0,
+        visitedChain: [],
+        broadcastCallback: broadcastToMachine
+      });
+    } catch (cascadeErr) {
+      console.error('[Cascade] Error during cascade processing:', cascadeErr);
+    }
+
     res.json({
       transitionId,
       fromStateId: currentStateId,
@@ -721,7 +752,8 @@ app.post('/api/instances/:id/send', async (req, res) => {
       timestamp: now,
       isFinal: !!isFinal,
       triggeredBy: 'user',
-      traceId: traceResult.traceId
+      traceId: traceResult.traceId,
+      cascade: cascadeResult
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -2771,6 +2803,138 @@ async function seedDemoTraces() {
   console.log('[DecisionTrace] Demo traces seeded successfully.');
 }
 
+app.get('/api/links/constants', async (req, res) => {
+  try {
+    res.json({
+      linkTypes: LINK_TYPE,
+      linkStatus: LINK_STATUS,
+      maxCascadeDepth: MAX_CASCADE_DEPTH
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/links', async (req, res) => {
+  try {
+    const { sourceInstanceId, targetInstanceId, linkType, triggerRules } = req.body;
+    const link = await createLink({
+      sourceInstanceId,
+      targetInstanceId,
+      linkType,
+      triggerRules
+    });
+    res.status(201).json(link);
+  } catch (e) {
+    if (e.message === 'Cycle detected in instance links' && e.cyclePath) {
+      return res.status(400).json({
+        error: e.message,
+        cyclePath: e.cyclePath
+      });
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/links/:id', async (req, res) => {
+  try {
+    const link = await getLinkById(req.params.id);
+    if (!link) return res.status(404).json({ error: 'Link not found' });
+    res.json(link);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/links', async (req, res) => {
+  try {
+    const includeBroken = req.query.includeBroken === 'true' || req.query.includeBroken === '1';
+    const links = await getLinksByMachineId(req.params.machineId, { includeBroken });
+    res.json(links);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/instances/:instanceId/links', async (req, res) => {
+  try {
+    const includeBroken = req.query.includeBroken === 'true' || req.query.includeBroken === '1';
+    const links = await getLinksByInstanceId(req.params.instanceId, { includeBroken });
+    res.json(links);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/links/:id/pause', async (req, res) => {
+  try {
+    const link = await pauseLink(req.params.id);
+    res.json(link);
+  } catch (e) {
+    if (e.message === 'Link not found') {
+      return res.status(404).json({ error: e.message });
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/links/:id/resume', async (req, res) => {
+  try {
+    const link = await resumeLink(req.params.id);
+    res.json(link);
+  } catch (e) {
+    if (e.message === 'Link not found') {
+      return res.status(404).json({ error: e.message });
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/links/:id', async (req, res) => {
+  try {
+    const deleted = await deleteLink(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Link not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/links/:id/skip-logs', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const link = await getLinkById(req.params.id);
+    if (!link) return res.status(404).json({ error: 'Link not found' });
+    const logs = await getSkipLogsByLinkId(req.params.id, { limit, offset });
+    res.json({
+      linkId: req.params.id,
+      skipLogs: logs
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/links/:id/cascade-history', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const link = await getLinkById(req.params.id);
+    if (!link) return res.status(404).json({ error: 'Link not found' });
+    const history = await getCascadeHistoryByLinkId(req.params.id, { limit, offset });
+    res.json({
+      linkId: req.params.id,
+      total: history.length,
+      limit,
+      offset,
+      history
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 async function start() {
   try {
     await initDB();
@@ -2783,6 +2947,7 @@ async function start() {
     await seedDemoTraces();
     await seedDemoSlaData();
     await seedDemoWebhookData();
+    await seedCascadeDemoData();
     await rebuildAllTimers();
     startSlaScanner(10);
 
