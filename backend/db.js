@@ -148,8 +148,15 @@ async function migrateDB() {
     await run('CREATE INDEX idx_instance_links_source_machine ON instance_links(source_machine_id)');
     await run('CREATE INDEX idx_instance_links_target_machine ON instance_links(target_machine_id)');
     await run('CREATE INDEX idx_instance_links_status ON instance_links(status)');
-    await run('CREATE UNIQUE INDEX idx_instance_links_unique ON instance_links(source_instance_id, target_instance_id, link_type)');
     console.log('Migrated: created instance_links table');
+  } else {
+    const oldUniqueIndex = await get(
+      `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_instance_links_unique'`
+    );
+    if (oldUniqueIndex) {
+      await run('DROP INDEX idx_instance_links_unique');
+      console.log('Migrated: dropped old unique index idx_instance_links_unique to allow multiple links per instance pair');
+    }
   }
 
   const hasLinkSkipLogsTable = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name='instance_link_skip_logs'`);
@@ -157,13 +164,15 @@ async function migrateDB() {
     await run(`
       CREATE TABLE instance_link_skip_logs (
         id TEXT PRIMARY KEY,
-        link_id TEXT NOT NULL,
+        link_id TEXT,
         source_instance_id TEXT NOT NULL,
-        target_instance_id TEXT NOT NULL,
+        target_instance_id TEXT,
         source_event TEXT NOT NULL,
-        target_event TEXT NOT NULL,
-        source_state_id TEXT NOT NULL,
+        target_event TEXT,
+        source_state_id TEXT,
         reason TEXT NOT NULL,
+        cascade_depth INTEGER,
+        detail_json TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (link_id) REFERENCES instance_links(id)
       )
@@ -172,7 +181,33 @@ async function migrateDB() {
     await run('CREATE INDEX idx_link_skip_logs_source ON instance_link_skip_logs(source_instance_id)');
     await run('CREATE INDEX idx_link_skip_logs_target ON instance_link_skip_logs(target_instance_id)');
     await run('CREATE INDEX idx_link_skip_logs_created ON instance_link_skip_logs(created_at)');
+    await run('CREATE INDEX idx_link_skip_logs_reason ON instance_link_skip_logs(reason)');
     console.log('Migrated: created instance_link_skip_logs table');
+  } else {
+    const hasCascadeDepth = await columnExists('instance_link_skip_logs', 'cascade_depth');
+    if (!hasCascadeDepth) {
+      await run('ALTER TABLE instance_link_skip_logs ADD COLUMN cascade_depth INTEGER');
+      console.log('Migrated: added instance_link_skip_logs.cascade_depth');
+    }
+    const hasDetailJson = await columnExists('instance_link_skip_logs', 'detail_json');
+    if (!hasDetailJson) {
+      await run('ALTER TABLE instance_link_skip_logs ADD COLUMN detail_json TEXT');
+      console.log('Migrated: added instance_link_skip_logs.detail_json');
+    }
+    const hasReasonIdx = await get(
+      `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_link_skip_logs_reason'`
+    );
+    if (!hasReasonIdx) {
+      await run('CREATE INDEX idx_link_skip_logs_reason ON instance_link_skip_logs(reason)');
+      console.log('Migrated: added index idx_link_skip_logs_reason');
+    }
+
+    const skipLinkIdNotNull = await get(
+      `SELECT name FROM pragma_table_info('instance_link_skip_logs') WHERE name='link_id' AND "notnull"=1`
+    );
+    if (skipLinkIdNotNull) {
+      console.log('Migrate note: instance_link_skip_logs.link_id NOT NULL constraint preserved, will pass null-safe values');
+    }
   }
 }
 
@@ -447,17 +482,18 @@ function initDB() {
         CREATE INDEX IF NOT EXISTS idx_instance_links_source_machine ON instance_links(source_machine_id);
         CREATE INDEX IF NOT EXISTS idx_instance_links_target_machine ON instance_links(target_machine_id);
         CREATE INDEX IF NOT EXISTS idx_instance_links_status ON instance_links(status);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_instance_links_unique ON instance_links(source_instance_id, target_instance_id, link_type);
 
         CREATE TABLE IF NOT EXISTS instance_link_skip_logs (
           id TEXT PRIMARY KEY,
-          link_id TEXT NOT NULL,
+          link_id TEXT,
           source_instance_id TEXT NOT NULL,
-          target_instance_id TEXT NOT NULL,
+          target_instance_id TEXT,
           source_event TEXT NOT NULL,
-          target_event TEXT NOT NULL,
-          source_state_id TEXT NOT NULL,
+          target_event TEXT,
+          source_state_id TEXT,
           reason TEXT NOT NULL,
+          cascade_depth INTEGER,
+          detail_json TEXT,
           created_at TEXT NOT NULL,
           FOREIGN KEY (link_id) REFERENCES instance_links(id)
         );

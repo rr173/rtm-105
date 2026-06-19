@@ -4,6 +4,12 @@ const { evaluateGuard } = require('./guard');
 const { recordStateDuration } = require('./metrics');
 const { checkTransitionCompliance } = require('./compliance-engine');
 const { triggerTransitionWebhooks } = require('./webhook-engine');
+const { processCascade } = require('./cascade-engine');
+
+let broadcastFn = null;
+function setTakeoverBroadcast(fn) {
+  broadcastFn = fn;
+}
 
 function getTimeoutManager() {
   return require('./timeout-manager');
@@ -386,6 +392,20 @@ async function processSingleEvent(instanceId, eventName, payload, machineDefinit
     console.error('[Webhook] Error triggering queued transition webhooks (async):', webhookErr);
   });
 
+  try {
+    await processCascade({
+      sourceInstanceId: row.id,
+      sourceEvent: eventName,
+      sourceToStateId: targetState.id,
+      payload: payload || {},
+      depth: 0,
+      visitedChain: [],
+      broadcastCallback: broadcastFn
+    });
+  } catch (cascadeErr) {
+    console.error('[Takeover] Error during cascade processing after queued event:', cascadeErr);
+  }
+
   return {
     transitionId,
     fromStateId: currentStateId,
@@ -721,6 +741,20 @@ async function executeTakeoverAction(sessionId, action, operatorId, operatorName
       if (!targetState.isFinal && targetState.timeout) {
         scheduleTimeout(session.instanceId, targetState.timeout, now);
       }
+
+      try {
+        await processCascade({
+          sourceInstanceId: session.instanceId,
+          sourceEvent: '__manual_jump__',
+          sourceToStateId: toStateId,
+          payload: action.context || {},
+          depth: 0,
+          visitedChain: [],
+          broadcastCallback: broadcastFn
+        });
+      } catch (cascadeErr) {
+        console.error('[Takeover] Error during cascade processing after manual jump:', cascadeErr);
+      }
       break;
     }
 
@@ -742,6 +776,20 @@ async function executeTakeoverAction(sessionId, action, operatorId, operatorName
 
       await recordStateDuration(session.instanceId, instance.machine_id, fromStateId, instance.entered_state_at || instance.created_at, now);
       clearInstanceTimeout(session.instanceId);
+
+      try {
+        await processCascade({
+          sourceInstanceId: session.instanceId,
+          sourceEvent: '__terminate__',
+          sourceToStateId: toStateId,
+          payload: { reason: action.reason || 'Manual termination' },
+          depth: 0,
+          visitedChain: [],
+          broadcastCallback: broadcastFn
+        });
+      } catch (cascadeErr) {
+        console.error('[Takeover] Error during cascade processing after terminate:', cascadeErr);
+      }
       break;
     }
 
@@ -980,5 +1028,6 @@ module.exports = {
   cancelTakeoverSession,
   processSingleEvent,
   resumeTakeoverSession,
-  completeTakeoverSession
+  completeTakeoverSession,
+  setTakeoverBroadcast
 };

@@ -59,6 +59,8 @@ function rowToSkipLog(row) {
     targetEvent: row.target_event,
     sourceStateId: row.source_state_id,
     reason: row.reason,
+    cascadeDepth: row.cascade_depth,
+    detail: row.detail_json ? JSON.parse(row.detail_json) : null,
     createdAt: row.created_at
   };
 }
@@ -70,15 +72,36 @@ async function recordSkipLog({
   sourceEvent,
   targetEvent,
   sourceStateId,
-  reason
+  reason,
+  cascadeDepth,
+  detail
 }) {
   const id = uuidv4();
   const now = new Date().toISOString();
+  const effectiveLinkId = linkId || null;
+  const effectiveTargetInstanceId = targetInstanceId || null;
+  const effectiveTargetEvent = targetEvent || null;
+  const effectiveSourceStateId = sourceStateId || null;
+  const effectiveCascadeDepth = typeof cascadeDepth === 'number' ? cascadeDepth : null;
+  const effectiveDetailJson = detail ? JSON.stringify(detail) : null;
+
   await run(
     `INSERT INTO instance_link_skip_logs 
-     (id, link_id, source_instance_id, target_instance_id, source_event, target_event, source_state_id, reason, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, linkId, sourceInstanceId, targetInstanceId, sourceEvent, targetEvent, sourceStateId, reason, now]
+     (id, link_id, source_instance_id, target_instance_id, source_event, target_event, source_state_id, reason, cascade_depth, detail_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      effectiveLinkId,
+      sourceInstanceId,
+      effectiveTargetInstanceId,
+      sourceEvent,
+      effectiveTargetEvent,
+      effectiveSourceStateId,
+      reason,
+      effectiveCascadeDepth,
+      effectiveDetailJson,
+      now
+    ]
   );
   return { id, createdAt: now };
 }
@@ -185,15 +208,6 @@ async function createLink({
 
   if (sourceMachine.name !== targetMachine.name) {
     throw new Error('Instances must belong to the same state machine (same name, possibly different versions)');
-  }
-
-  const existing = await get(
-    `SELECT id FROM instance_links 
-     WHERE source_instance_id = ? AND target_instance_id = ? AND link_type = ?`,
-    [sourceInstanceId, targetInstanceId, linkType]
-  );
-  if (existing) {
-    throw new Error('Link with same source, target, and type already exists');
   }
 
   const cycle = await detectCycle(sourceInstanceId, targetInstanceId);
@@ -334,12 +348,12 @@ async function markLinkAsBroken(id, reason) {
 }
 
 async function checkAndMarkBrokenLinks() {
-  const activeLinks = await all(
-    `SELECT * FROM instance_links WHERE status = ?`,
-    [LINK_STATUS.ACTIVE]
+  const nonBrokenLinks = await all(
+    `SELECT * FROM instance_links WHERE status != ?`,
+    [LINK_STATUS.BROKEN]
   );
 
-  for (const link of activeLinks) {
+  for (const link of nonBrokenLinks) {
     const sourceExists = await get(
       'SELECT id FROM instances WHERE id = ?',
       [link.source_instance_id]
@@ -598,6 +612,22 @@ async function processCascade({
 }) {
   if (depth >= MAX_CASCADE_DEPTH) {
     console.warn(`[Cascade] Max depth (${MAX_CASCADE_DEPTH}) reached, skipping cascade from instance ${sourceInstanceId}`);
+    try {
+      await recordSkipLog({
+        sourceInstanceId,
+        sourceEvent,
+        reason: 'max_depth_exceeded',
+        cascadeDepth: depth,
+        detail: {
+          maxCascadeDepth: MAX_CASCADE_DEPTH,
+          sourceToStateId,
+          payload,
+          visitedChain
+        }
+      });
+    } catch (logErr) {
+      console.error('[Cascade] Failed to record max_depth skip log:', logErr);
+    }
     return { skipped: true, reason: 'max_depth_exceeded', results: [] };
   }
 

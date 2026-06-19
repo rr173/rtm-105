@@ -73,7 +73,8 @@ const {
   cancelTakeoverSession,
   resumeTakeoverSession,
   completeTakeoverSession,
-  processQueuedEvents
+  processQueuedEvents,
+  setTakeoverBroadcast
 } = require('./takeover-engine');
 const {
   SEVERITY,
@@ -177,6 +178,7 @@ function broadcastToMachine(machineId, message) {
 
 setBroadcast(broadcastToMachine);
 setSlaBroadcast(broadcastToMachine);
+setTakeoverBroadcast(broadcastToMachine);
 
 function buildTimeoutInfo(instanceId, machineDefinition, currentStateId, enteredStateAt) {
   const scheduled = getTimeoutInfoForInstance(instanceId);
@@ -473,6 +475,63 @@ app.get('/api/instances/:id', async (req, res) => {
       takeoverSessions,
       recentViolations
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/instances/:id', async (req, res) => {
+  try {
+    const row = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Instance not found' });
+
+    const instanceId = req.params.id;
+
+    try {
+      const linkedSimIds = await all(
+        'SELECT id FROM simulations WHERE source_instance_id = ?',
+        [instanceId]
+      );
+      for (const s of linkedSimIds) {
+        try { await run('DELETE FROM simulation_steps WHERE branch_id IN (SELECT id FROM simulation_branches WHERE simulation_id = ?)', [s.id]); } catch (_) {}
+        try { await run('DELETE FROM simulation_branches WHERE simulation_id = ?', [s.id]); } catch (_) {}
+        try { await run('DELETE FROM simulations WHERE id = ?', [s.id]); } catch (_) {}
+      }
+    } catch (_) {}
+
+    try { await run('DELETE FROM instance_event_queue WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM instance_tags WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM transitions WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM compliance_violations WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM state_durations WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM decision_traces WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM migration_history WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM takeover_actions WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM takeover_sessions WHERE instance_id = ?', [instanceId]); } catch (_) {}
+    try { await run('DELETE FROM instance_freeze WHERE instance_id = ?', [instanceId]); } catch (_) {}
+
+    const now = new Date().toISOString();
+    try {
+      await run(
+        `UPDATE instance_links SET status = ?, updated_at = ? 
+         WHERE status != ? AND (source_instance_id = ? OR target_instance_id = ?)`,
+        [LINK_STATUS.BROKEN, now, LINK_STATUS.BROKEN, instanceId, instanceId]
+      );
+    } catch (_) {}
+
+    await run('DELETE FROM instances WHERE id = ?', [instanceId]);
+
+    clearInstanceTimeout(instanceId);
+
+    const broadcastMsg = {
+      type: 'instance_deleted',
+      instanceId,
+      machineId: row.machine_id,
+      timestamp: now
+    };
+    broadcastToMachine(row.machine_id, broadcastMsg);
+
+    res.json({ success: true, instanceId });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -5,6 +5,7 @@ const { isInstanceFrozen } = require('./takeover-engine');
 const { buildAndSaveTrace, linkTraceToTransition } = require('./decision-trace');
 const { resolveSlaViolation } = require('./sla-engine');
 const { triggerTransitionWebhooks } = require('./webhook-engine');
+const { processCascade } = require('./cascade-engine');
 
 const activeTimers = new Map();
 
@@ -175,6 +176,20 @@ async function sendTimeoutEvent(instanceId, timeoutConfig) {
   });
 
   console.log(`[Timeout] Instance ${instanceId} transitioned from ${currentStateId} to ${targetState.id} via timeout event ${event}`);
+
+  try {
+    await processCascade({
+      sourceInstanceId: row.id,
+      sourceEvent: event,
+      sourceToStateId: targetState.id,
+      payload: payload || {},
+      depth: 0,
+      visitedChain: [],
+      broadcastCallback: broadcastFn
+    });
+  } catch (cascadeErr) {
+    console.error('[Timeout] Error during cascade processing:', cascadeErr);
+  }
 
   if (!isFinal && targetState.timeout) {
     scheduleTimeout(instanceId, targetState.timeout, now);
