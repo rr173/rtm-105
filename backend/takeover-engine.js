@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const { evaluateGuard } = require('./guard');
 const { recordStateDuration } = require('./metrics');
 const { checkTransitionCompliance } = require('./compliance-engine');
+const { triggerTransitionWebhooks } = require('./webhook-engine');
 
 function getTimeoutManager() {
   return require('./timeout-manager');
@@ -363,6 +364,27 @@ async function processSingleEvent(instanceId, eventName, payload, machineDefinit
   if (!targetState.isFinal && targetState.timeout) {
     scheduleTimeout(row.id, targetState.timeout, now);
   }
+
+  const matchedDefTransition = machineDefinition.transitions.find(t =>
+    t.sourceStateId === currentStateId &&
+    t.targetStateId === targetState.id &&
+    t.event === eventName
+  );
+
+  triggerTransitionWebhooks({
+    machineId: row.machine_id,
+    machineDefinition,
+    instanceId: row.id,
+    transitionRecordId: transitionId,
+    sourceStateId: currentStateId,
+    targetStateId: targetState.id,
+    eventName,
+    payload: payload || {},
+    context: context,
+    definitionTransitionId: matchedDefTransition ? matchedDefTransition.id : null
+  }).catch(webhookErr => {
+    console.error('[Webhook] Error triggering queued transition webhooks (async):', webhookErr);
+  });
 
   return {
     transitionId,

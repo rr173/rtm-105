@@ -4,6 +4,7 @@ const { recordStateDuration } = require('./metrics');
 const { isInstanceFrozen } = require('./takeover-engine');
 const { buildAndSaveTrace, linkTraceToTransition } = require('./decision-trace');
 const { resolveSlaViolation } = require('./sla-engine');
+const { triggerTransitionWebhooks } = require('./webhook-engine');
 
 const activeTimers = new Map();
 
@@ -151,6 +152,27 @@ async function sendTimeoutEvent(instanceId, timeoutConfig) {
       isFinal: !!isFinal
     });
   }
+
+  const matchedDefTransition = definition.transitions.find(t =>
+    t.sourceStateId === currentStateId &&
+    t.targetStateId === targetState.id &&
+    t.event === event
+  );
+
+  triggerTransitionWebhooks({
+    machineId: row.machine_id,
+    machineDefinition: definition,
+    instanceId: row.id,
+    transitionRecordId: transitionId,
+    sourceStateId: currentStateId,
+    targetStateId: targetState.id,
+    eventName: event,
+    payload: payload || {},
+    context: context,
+    definitionTransitionId: matchedDefTransition ? matchedDefTransition.id : null
+  }).catch(webhookErr => {
+    console.error('[Webhook] Error triggering timeout transition webhooks (async):', webhookErr);
+  });
 
   console.log(`[Timeout] Instance ${instanceId} transitioned from ${currentStateId} to ${targetState.id} via timeout event ${event}`);
 

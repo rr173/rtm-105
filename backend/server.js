@@ -121,6 +121,24 @@ const {
   seedDemoSlaData,
   resolveSlaViolation
 } = require('./sla-engine');
+const {
+  DELIVERY_STATUS,
+  initWebhookDB,
+  addWebhookConfig,
+  updateWebhookConfig,
+  deleteWebhookConfig,
+  getWebhookConfigById,
+  getWebhookConfigsByMachineId,
+  getWebhookConfigsByTransition,
+  listAllWebhookConfigs,
+  triggerTransitionWebhooks,
+  getDeliveries,
+  countDeliveries,
+  getDeliveryById,
+  getCircuitBreakerStatus,
+  resetCircuitBreakerManually,
+  seedDemoWebhookData
+} = require('./webhook-engine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -673,6 +691,27 @@ app.post('/api/instances/:id/send', async (req, res) => {
       isFinal: !!isFinal
     };
     broadcastToMachine(row.machine_id, wsMessage);
+
+    const matchedDefTransition = machine.definition.transitions.find(t =>
+      t.sourceStateId === currentStateId &&
+      t.targetStateId === targetState.id &&
+      t.event === event
+    );
+
+    triggerTransitionWebhooks({
+      machineId: row.machine_id,
+      machineDefinition: machine.definition,
+      instanceId: row.id,
+      transitionRecordId: transitionId,
+      sourceStateId: currentStateId,
+      targetStateId: targetState.id,
+      eventName: event,
+      payload: payload || {},
+      context: context,
+      definitionTransitionId: matchedDefTransition ? matchedDefTransition.id : null
+    }).catch(webhookErr => {
+      console.error('[Webhook] Error triggering transition webhooks (async):', webhookErr);
+    });
 
     res.json({
       transitionId,
@@ -2146,6 +2185,228 @@ app.get('/api/machines/:machineId/sla/compliance', async (req, res) => {
   }
 });
 
+app.post('/api/webhooks/echo', (req, res) => {
+  res.json({
+    status: 'ok',
+    receivedAt: new Date().toISOString(),
+    echo: req.body
+  });
+});
+
+app.get('/api/webhooks/configs', async (req, res) => {
+  try {
+    const { machineId, enabled } = req.query;
+    const options = {};
+    if (machineId) options.machineId = machineId;
+    if (enabled !== undefined) options.enabled = enabled === 'true' || enabled === '1';
+    const configs = await listAllWebhookConfigs(options);
+    res.json(configs);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/webhooks/configs', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const includeDisabled = req.query.includeDisabled === 'true' || req.query.includeDisabled === '1';
+    const configs = await getWebhookConfigsByMachineId(req.params.machineId, { includeDisabled });
+    res.json(configs);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/machines/:machineId/webhooks/configs', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const config = await addWebhookConfig({
+      ...req.body,
+      machineId: req.params.machineId
+    });
+    res.status(201).json(config);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/webhooks/configs/:id', async (req, res) => {
+  try {
+    const config = await getWebhookConfigById(req.params.id);
+    if (!config) return res.status(404).json({ error: 'Webhook config not found' });
+    res.json(config);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/webhooks/configs/:id', async (req, res) => {
+  try {
+    const config = await updateWebhookConfig(req.params.id, req.body);
+    res.json(config);
+  } catch (e) {
+    if (e.message === 'Webhook config not found') {
+      return res.status(404).json({ error: e.message });
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/webhooks/configs/:id', async (req, res) => {
+  try {
+    const deleted = await deleteWebhookConfig(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Webhook config not found' });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/webhooks/configs/by-transition/:transitionId', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const includeDisabled = req.query.includeDisabled === 'true' || req.query.includeDisabled === '1';
+    const configs = await getWebhookConfigsByTransition(
+      req.params.machineId,
+      req.params.transitionId,
+      { includeDisabled }
+    );
+    res.json(configs);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/webhooks/deliveries', async (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.machineId) filters.machineId = req.query.machineId;
+    if (req.query.instanceId) filters.instanceId = req.query.instanceId;
+    if (req.query.configId) filters.configId = req.query.configId;
+    if (req.query.status) filters.status = req.query.status;
+    if (req.query.fromTime) filters.fromTime = req.query.fromTime;
+    if (req.query.toTime) filters.toTime = req.query.toTime;
+    if (req.query.limit) {
+      const n = parseInt(req.query.limit, 10);
+      if (!isNaN(n) && n > 0) filters.limit = n;
+    }
+    if (req.query.offset) {
+      const n = parseInt(req.query.offset, 10);
+      if (!isNaN(n) && n >= 0) filters.offset = n;
+    }
+    const deliveries = await getDeliveries(filters);
+    const total = await countDeliveries(filters);
+    res.json({
+      total,
+      limit: filters.limit || 50,
+      offset: filters.offset || 0,
+      deliveries
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/webhooks/deliveries/:id', async (req, res) => {
+  try {
+    const delivery = await getDeliveryById(req.params.id);
+    if (!delivery) return res.status(404).json({ error: 'Delivery record not found' });
+    res.json(delivery);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/machines/:machineId/webhooks/deliveries', async (req, res) => {
+  try {
+    const machine = await getMachineById(req.params.machineId);
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    const filters = { machineId: req.params.machineId };
+    if (req.query.status) filters.status = req.query.status;
+    if (req.query.fromTime) filters.fromTime = req.query.fromTime;
+    if (req.query.toTime) filters.toTime = req.query.toTime;
+    if (req.query.configId) filters.configId = req.query.configId;
+    if (req.query.limit) {
+      const n = parseInt(req.query.limit, 10);
+      if (!isNaN(n) && n > 0) filters.limit = n;
+    }
+    if (req.query.offset) {
+      const n = parseInt(req.query.offset, 10);
+      if (!isNaN(n) && n >= 0) filters.offset = n;
+    }
+    const deliveries = await getDeliveries(filters);
+    const total = await countDeliveries(filters);
+    res.json({
+      machineId: req.params.machineId,
+      machineName: machine.name,
+      total,
+      limit: filters.limit || 50,
+      offset: filters.offset || 0,
+      deliveries
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/instances/:instanceId/webhooks/deliveries', async (req, res) => {
+  try {
+    const row = await get('SELECT * FROM instances WHERE id = ?', [req.params.instanceId]);
+    if (!row) return res.status(404).json({ error: 'Instance not found' });
+    const filters = { instanceId: req.params.instanceId };
+    if (req.query.status) filters.status = req.query.status;
+    if (req.query.fromTime) filters.fromTime = req.query.fromTime;
+    if (req.query.toTime) filters.toTime = req.query.toTime;
+    if (req.query.configId) filters.configId = req.query.configId;
+    if (req.query.limit) {
+      const n = parseInt(req.query.limit, 10);
+      if (!isNaN(n) && n > 0) filters.limit = n;
+    }
+    if (req.query.offset) {
+      const n = parseInt(req.query.offset, 10);
+      if (!isNaN(n) && n >= 0) filters.offset = n;
+    }
+    const deliveries = await getDeliveries(filters);
+    const total = await countDeliveries(filters);
+    res.json({
+      instanceId: req.params.instanceId,
+      total,
+      limit: filters.limit || 50,
+      offset: filters.offset || 0,
+      deliveries
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/webhooks/configs/:id/circuit-breaker', async (req, res) => {
+  try {
+    const status = await getCircuitBreakerStatus(req.params.id);
+    res.json(status);
+  } catch (e) {
+    if (e.message === 'Webhook config not found') {
+      return res.status(404).json({ error: e.message });
+    }
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/webhooks/configs/:id/circuit-breaker/reset', async (req, res) => {
+  try {
+    const result = await resetCircuitBreakerManually(req.params.id);
+    res.json(result);
+  } catch (e) {
+    if (e.message === 'Webhook config not found') {
+      return res.status(404).json({ error: e.message });
+    }
+    res.status(500).json({ error: e.message });
+  }
+});
+
 async function seedDemoTraces() {
   const traceCount = await get('SELECT COUNT(*) as cnt FROM decision_traces');
   if (traceCount.cnt > 0) {
@@ -2517,9 +2778,11 @@ async function start() {
     await initAnalysisDB();
     await initTraceDB();
     await initSlaDB();
+    await initWebhookDB();
     await seedDemoData();
     await seedDemoTraces();
     await seedDemoSlaData();
+    await seedDemoWebhookData();
     await rebuildAllTimers();
     startSlaScanner(10);
 
