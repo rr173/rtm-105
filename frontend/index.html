@@ -17,6 +17,7 @@
       <button id="btn-open-takeover" class="btn" style="background: #d4380d;">🚨 人工接管工作台</button>
       <button id="btn-open-batch" class="btn" style="background: #1890ff;">🏷️ 标签与批量操作</button>
       <button id="btn-open-diff-reports" class="btn" style="background: #13c2c2;">📊 版本差异报告</button>
+      <button id="btn-open-decision-trace" class="btn" style="background: #fa8c16;">🔍 决策链路追踪</button>
     </div>
   </header>
 
@@ -901,6 +902,110 @@
 
           <h4 style="margin:16px 0 8px;">🔍 详细差异</h4>
           <div id="diff-report-differences" style="max-height:350px;overflow-y:auto;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="decision-trace-modal" class="modal-overlay" style="display:none; z-index: 10005;">
+    <div class="modal" style="max-width: 1500px; width: 95vw; max-height: 95vh;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #fa8c16 0%, #d46b08 100%);">
+        <h2>🔍 决策链路追踪</h2>
+        <button id="btn-close-decision-trace" class="modal-close">&times;</button>
+      </div>
+
+      <div class="dt-main">
+        <div class="dt-sidebar">
+          <div class="dt-tabs">
+            <button class="dt-tab active" data-dt-tab="trace-list">📋 Trace 列表</button>
+            <button class="dt-tab" data-dt-tab="trace-compare">⚖️ Trace 对比</button>
+            <button class="dt-tab" data-dt-tab="bottlenecks">⏱️ 瓶颈统计</button>
+          </div>
+
+          <div id="dt-tab-trace-list" class="dt-tab-panel">
+            <div class="dt-filters">
+              <select id="dt-filter-machine" class="form-control">
+                <option value="">全部状态机</option>
+              </select>
+              <select id="dt-filter-result" class="form-control">
+                <option value="">全部结果</option>
+                <option value="accepted">✅ 放行</option>
+                <option value="rejected_no_match">❌ 无匹配转换</option>
+                <option value="rejected_compliance">🚫 合规拦截</option>
+              </select>
+              <input type="text" id="dt-filter-event" class="form-control" placeholder="事件名搜索...">
+              <button id="dt-btn-search" class="btn btn-sm btn-primary">🔍 查询</button>
+              <button id="dt-btn-clear-filters" class="btn btn-sm">清空</button>
+            </div>
+            <div id="dt-trace-list" class="dt-trace-list"></div>
+          </div>
+
+          <div id="dt-tab-trace-compare" class="dt-tab-panel" style="display:none;">
+            <div class="dt-compare-selectors">
+              <div class="compare-selector-block">
+                <label><strong>Trace A</strong>（基线）</label>
+                <select id="dt-compare-a" class="form-control">
+                  <option value="">请选择 Trace A</option>
+                </select>
+                <div id="dt-compare-a-info" class="compare-info-block"></div>
+              </div>
+              <div class="dt-compare-vs">VS</div>
+              <div class="compare-selector-block">
+                <label><strong>Trace B</strong>（对比）</label>
+                <select id="dt-compare-b" class="form-control">
+                  <option value="">请选择 Trace B</option>
+                </select>
+                <div id="dt-compare-b-info" class="compare-info-block"></div>
+              </div>
+            </div>
+            <div style="margin:16px 0; text-align:center;">
+              <button id="dt-btn-run-compare" class="btn btn-primary" disabled style="padding:10px 40px;">⚖️ 开始对比</button>
+            </div>
+            <div id="dt-compare-summary" style="display:none;" class="compare-summary"></div>
+          </div>
+
+          <div id="dt-tab-bottlenecks" class="dt-tab-panel" style="display:none;">
+            <div class="dt-filters">
+              <select id="dt-bn-machine" class="form-control">
+                <option value="">全部状态机</option>
+              </select>
+              <select id="dt-bn-range" class="form-control">
+                <option value="">全部时间</option>
+                <option value="1h">最近 1 小时</option>
+                <option value="24h">最近 24 小时</option>
+                <option value="7d">最近 7 天</option>
+                <option value="30d">最近 30 天</option>
+              </select>
+              <button id="dt-btn-bn-refresh" class="btn btn-sm btn-primary">🔄 刷新统计</button>
+            </div>
+            <div id="dt-bottleneck-summary" class="bottleneck-summary"></div>
+            <h4 style="margin:16px 0 8px;">🐢 Top 5 平均耗时最长的转换</h4>
+            <div id="dt-bn-transitions" class="bottleneck-table-wrap"></div>
+            <h4 style="margin:20px 0 8px;">🛡️ Top 5 平均耗时最长的守卫表达式</h4>
+            <div id="dt-bn-guards" class="bottleneck-table-wrap"></div>
+            <h4 style="margin:20px 0 8px;">📜 合规策略耗时排名</h4>
+            <div id="dt-bn-policies" class="bottleneck-table-wrap"></div>
+          </div>
+        </div>
+
+        <div class="dt-content">
+          <div id="dt-tab-trace-detail" class="dt-detail-panel">
+            <div id="dt-trace-detail" class="dt-trace-detail">
+              <div class="empty-state">
+                <div style="font-size:48px; margin-bottom:16px;">🧭</div>
+                <div style="color:#8c8c8c; font-size:14px;">从左侧选择一条 Trace 查看完整决策过程</div>
+              </div>
+            </div>
+          </div>
+
+          <div id="dt-tab-compare-detail" class="dt-detail-panel" style="display:none;">
+            <div id="dt-compare-detail" class="dt-compare-detail">
+              <div class="empty-state">
+                <div style="font-size:48px; margin-bottom:16px;">⚖️</div>
+                <div style="color:#8c8c8c; font-size:14px;">选择两条 Trace 开始并排对比分析</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const path = require('path');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const WebSocket = require('ws');
@@ -107,7 +108,10 @@ const {
   countTraces,
   buildAndSaveTrace,
   linkTraceToTransition,
-  saveTrace
+  saveTrace,
+  compareTraces,
+  getBottleneckStats,
+  generateBottleneckDemoTraces
 } = require('./decision-trace');
 const {
   initSlaDB,
@@ -188,6 +192,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -2409,6 +2414,38 @@ app.get('/api/traces/:id', async (req, res) => {
   }
 });
 
+app.post('/api/traces/compare', async (req, res) => {
+  try {
+    const { traceIdA, traceIdB } = req.body;
+    if (!traceIdA || !traceIdB) {
+      return res.status(400).json({ error: 'traceIdA and traceIdB are required' });
+    }
+    const [traceA, traceB] = await Promise.all([
+      getTraceById(traceIdA),
+      getTraceById(traceIdB)
+    ]);
+    if (!traceA) return res.status(404).json({ error: `Trace A not found: ${traceIdA}` });
+    if (!traceB) return res.status(404).json({ error: `Trace B not found: ${traceIdB}` });
+    const result = compareTraces(traceA, traceB);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/traces/bottlenecks/stats', async (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.machineId) filters.machineId = req.query.machineId;
+    if (req.query.startTime) filters.startTime = req.query.startTime;
+    if (req.query.endTime) filters.endTime = req.query.endTime;
+    const stats = await getBottleneckStats(filters);
+    res.json(stats);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/instances/:id/traces', async (req, res) => {
   try {
     const row = await get('SELECT * FROM instances WHERE id = ?', [req.params.id]);
@@ -3411,6 +3448,7 @@ async function start() {
     await initWebhookDB();
     await seedDemoData();
     await seedDemoTraces();
+    await generateBottleneckDemoTraces();
     await seedDemoSlaData();
     await seedDemoWebhookData();
     await seedCascadeDemoData();

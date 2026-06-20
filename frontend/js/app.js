@@ -2598,6 +2598,50 @@ class WorkflowApp {
     }
     return escapeHtml(String(val));
   }
+
+  bindTakeoverEvents() {
+    try {
+      const modal = document.getElementById('takeover-modal');
+      const openBtn = document.getElementById('btn-open-takeover');
+      if (!modal || !openBtn) return;
+      const closeBtn = document.getElementById('takeover-close-btn');
+      openBtn.addEventListener('click', () => {
+        modal.style.display = 'flex';
+      });
+      if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+          modal.style.display = 'none';
+        });
+      }
+      modal.addEventListener('click', (e) => {
+        if (e.target.id === 'takeover-modal') modal.style.display = 'none';
+      });
+    } catch (e) {
+      console.warn('bindTakeoverEvents skipped:', e.message);
+    }
+  }
+
+  bindBatchEvents() {
+    try {
+      const modal = document.getElementById('batch-modal');
+      const openBtn = document.getElementById('btn-open-batch');
+      if (!modal || !openBtn) return;
+      const closeBtn = document.getElementById('btn-close-batch');
+      openBtn.addEventListener('click', () => {
+        modal.style.display = 'flex';
+      });
+      if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+          modal.style.display = 'none';
+        });
+      }
+      modal.addEventListener('click', (e) => {
+        if (e.target.id === 'batch-modal') modal.style.display = 'none';
+      });
+    } catch (e) {
+      console.warn('bindBatchEvents skipped:', e.message);
+    }
+  }
 }
 
 class SimulationLab {
@@ -5398,7 +5442,702 @@ class SimulationLab {
 
 }
 
+class DecisionTraceUI {
+  constructor() {
+    this.selectedTraceId = null;
+    this.allTraces = [];
+    this.compareA = null;
+    this.compareB = null;
+    this.currentCompareResult = null;
+    this.init();
+  }
+
+  init() {
+    document.getElementById('btn-open-decision-trace').addEventListener('click', () => this.open());
+    document.getElementById('btn-close-decision-trace').addEventListener('click', () => this.close());
+    document.getElementById('decision-trace-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'decision-trace-modal') this.close();
+    });
+
+    document.querySelectorAll('.dt-tab').forEach(tab => {
+      tab.addEventListener('click', (e) => this.switchTab(e.target.dataset.dtTab));
+    });
+
+    document.getElementById('dt-btn-search').addEventListener('click', () => this.loadTraceList());
+    document.getElementById('dt-btn-clear-filters').addEventListener('click', () => this.clearFilters());
+    document.getElementById('dt-btn-bn-refresh').addEventListener('click', () => this.loadBottleneckStats());
+    document.getElementById('dt-btn-run-compare').addEventListener('click', () => this.runCompare());
+    document.getElementById('dt-compare-a').addEventListener('change', (e) => this.onCompareSelect('a', e.target.value));
+    document.getElementById('dt-compare-b').addEventListener('change', (e) => this.onCompareSelect('b', e.target.value));
+  }
+
+  async open() {
+    document.getElementById('decision-trace-modal').style.display = 'flex';
+    await this.loadMachines();
+    await this.loadTraceList();
+    await this.loadBottleneckStats();
+  }
+
+  close() {
+    document.getElementById('decision-trace-modal').style.display = 'none';
+  }
+
+  async switchTab(tabName) {
+    document.querySelectorAll('.dt-tab').forEach(t => t.classList.toggle('active', t.dataset.dtTab === tabName));
+    document.querySelectorAll('.dt-tab-panel').forEach(p => p.style.display = 'none');
+    document.getElementById(`dt-tab-${tabName}`).style.display = 'block';
+
+    document.getElementById('dt-tab-trace-detail').style.display = (tabName === 'trace-list' ? 'block' : 'none');
+    document.getElementById('dt-tab-compare-detail').style.display = (tabName === 'trace-compare' ? 'block' : 'none');
+
+    if (tabName === 'bottlenecks') {
+      await this.loadBottleneckStats();
+    }
+    if (tabName === 'trace-compare') {
+      this.populateCompareSelectors();
+    }
+  }
+
+  async loadMachines() {
+    try {
+      const res = await fetch('/api/state-machines');
+      const data = await res.json();
+      const opts = ['<option value="">全部状态机</option>'];
+      data.forEach(m => {
+        opts.push(`<option value="${m.id}">${escapeHtml(m.name || m.id)}</option>`);
+      });
+      const optsHtml = opts.join('');
+      ['dt-filter-machine', 'dt-bn-machine'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = optsHtml;
+      });
+    } catch (e) {
+      console.error('loadMachines error:', e);
+    }
+  }
+
+  clearFilters() {
+    document.getElementById('dt-filter-machine').value = '';
+    document.getElementById('dt-filter-result').value = '';
+    document.getElementById('dt-filter-event').value = '';
+    this.loadTraceList();
+  }
+
+  async loadTraceList() {
+    const params = new URLSearchParams();
+    const mId = document.getElementById('dt-filter-machine').value;
+    const result = document.getElementById('dt-filter-result').value;
+    const event = document.getElementById('dt-filter-event').value;
+    if (mId) params.set('machineId', mId);
+    if (result) params.set('decisionResult', result);
+    if (event) params.set('eventName', event);
+    params.set('limit', '100');
+
+    try {
+      const res = await fetch(`/api/traces?${params.toString()}`);
+      const data = await res.json();
+      this.allTraces = data.traces || [];
+      this.renderTraceList();
+    } catch (e) {
+      console.error('loadTraceList error:', e);
+    }
+  }
+
+  renderTraceList() {
+    const el = document.getElementById('dt-trace-list');
+    if (!this.allTraces.length) {
+      el.innerHTML = `<div class="bn-empty">暂无 Trace 数据</div>`;
+      return;
+    }
+    el.innerHTML = this.allTraces.map(t => {
+      const resultIcon = t.decisionResult === 'accepted' ? '✅'
+        : t.decisionResult === 'rejected_compliance' ? '🚫' : '❌';
+      const resultLabel = t.decisionResult === 'accepted' ? '放行'
+        : t.decisionResult === 'rejected_compliance' ? '合规拦截' : '无匹配';
+      const selectedCls = this.selectedTraceId === t.id ? 'selected' : '';
+      return `
+        <div class="dt-trace-item ${selectedCls}" data-trace-id="${t.id}">
+          <div class="dt-trace-item-header">
+            <span class="dt-trace-event">${resultIcon} ${escapeHtml(t.eventName || 'Unknown')}</span>
+            <span style="font-size:11px; font-family:monospace; color:#8c8c8c;">${t.id.slice(0, 8)}</span>
+          </div>
+          <div class="dt-trace-meta">
+            <span class="dt-trace-meta-item">🏷️ ${escapeHtml(t.machineName || t.machineId || '')}</span>
+            <span class="dt-trace-meta-item">👤 ${escapeHtml(t.instanceId ? t.instanceId.slice(0, 8) : '')}</span>
+            <span class="dt-trace-meta-item">⏱️ ${t.totalDurationMs?.toFixed(1) || 0}ms</span>
+          </div>
+          <div class="dt-trace-state-flow">
+            ${escapeHtml(t.sourceState || '-')} → <strong>${escapeHtml(t.targetState || resultLabel)}</strong>
+            <span style="float:right;color:#8c8c8c;font-size:11px;">${this.formatTime(t.createdAt)}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+    el.querySelectorAll('.dt-trace-item').forEach(item => {
+      item.addEventListener('click', () => this.selectTrace(item.dataset.traceId));
+    });
+  }
+
+  async selectTrace(traceId) {
+    this.selectedTraceId = traceId;
+    this.renderTraceList();
+    try {
+      const res = await fetch(`/api/traces/${traceId}`);
+      const trace = await res.json();
+      this.renderTraceDetail(trace);
+    } catch (e) {
+      console.error('selectTrace error:', e);
+    }
+  }
+
+  renderTraceDetail(trace) {
+    const el = document.getElementById('dt-trace-detail');
+    const resultIcon = trace.decisionResult === 'accepted' ? '✅'
+      : trace.decisionResult === 'rejected_compliance' ? '🚫' : '❌';
+    const resultLabel = trace.decisionResult === 'accepted' ? '放行'
+      : trace.decisionResult === 'rejected_compliance' ? '合规拦截' : '无匹配转换';
+
+    const addToCompareBtn = `
+      <button class="btn btn-sm" onclick="decisionTraceUI.addToCompare('A', '${trace.id}')">➕ 设为对比 A</button>
+      <button class="btn btn-sm" onclick="decisionTraceUI.addToCompare('B', '${trace.id}')">➕ 设为对比 B</button>
+    `;
+
+    let phasesHtml = '';
+    if (trace.phases) {
+      const phases = typeof trace.phases === 'string' ? JSON.parse(trace.phases) : trace.phases;
+      phasesHtml = this.renderPhases(phases);
+    } else if (trace.rawPhases) {
+      const phases = typeof trace.rawPhases === 'string' ? JSON.parse(trace.rawPhases) : trace.rawPhases;
+      phasesHtml = this.renderPhases(phases);
+    }
+
+    el.innerHTML = `
+      <div class="trace-actions-bar">${addToCompareBtn}</div>
+      <div class="trace-detail-header">
+        <div class="trace-detail-title">
+          <span style="font-size:20px;">${resultIcon}</span>
+          <h3 style="margin:0;font-size:18px;">${escapeHtml(trace.eventName || 'Unknown Event')}</h3>
+          <span class="trace-detail-id">#${trace.id}</span>
+        </div>
+        <div class="trace-detail-stats">
+          <div class="trace-stat">
+            <div class="trace-stat-label">决策结果</div>
+            <div class="trace-stat-value">${resultLabel}</div>
+          </div>
+          <div class="trace-stat">
+            <div class="trace-stat-label">状态机</div>
+            <div class="trace-stat-value" style="font-size:12px;">${escapeHtml(trace.machineName || trace.machineId || '-')}</div>
+          </div>
+          <div class="trace-stat">
+            <div class="trace-stat-label">源状态</div>
+            <div class="trace-stat-value">${escapeHtml(trace.sourceState || '-')}</div>
+          </div>
+          <div class="trace-stat">
+            <div class="trace-stat-label">目标状态</div>
+            <div class="trace-stat-value">${escapeHtml(trace.targetState || '-')}</div>
+          </div>
+          <div class="trace-stat">
+            <div class="trace-stat-label">总耗时</div>
+            <div class="trace-stat-value">${trace.totalDurationMs?.toFixed(2) || 0} ms</div>
+          </div>
+          <div class="trace-stat">
+            <div class="trace-stat-label">创建时间</div>
+            <div class="trace-stat-value" style="font-size:11px;">${this.formatTime(trace.createdAt)}</div>
+          </div>
+        </div>
+      </div>
+      <div class="trace-phases">${phasesHtml || '<div class="bn-empty">无详细阶段数据</div>'}</div>
+    `;
+  }
+
+  renderPhases(phases) {
+    if (!Array.isArray(phases) || !phases.length) return '';
+    const phaseTitleMap = {
+      'event_collection': { name: '📥 事件收集阶段', cls: 'event-collection' },
+      'event_collection_eval': { name: '📥 事件收集阶段', cls: 'event-collection' },
+      'guards': { name: '🛡️ 守卫判定阶段', cls: 'guards' },
+      'guards_evaluation': { name: '🛡️ 守卫判定阶段', cls: 'guards' },
+      'compliance': { name: '📜 合规校验阶段', cls: 'compliance' },
+      'compliance_check': { name: '📜 合规校验阶段', cls: 'compliance' },
+      'selection': { name: '🎯 目标选择阶段', cls: 'selection' },
+      'conflict_resolution': { name: '🎯 目标选择阶段', cls: 'selection' },
+      'execution': { name: '▶️ 执行阶段', cls: 'execution' },
+      'transition_execution': { name: '▶️ 执行阶段', cls: 'execution' },
+    };
+    return phases.map(p => {
+      const key = p.phase || p.name || 'execution';
+      const meta = phaseTitleMap[key] || { name: `📋 ${escapeHtml(key)}`, cls: 'execution' };
+      const duration = p.durationMs || p.duration || 0;
+      return `
+        <div class="phase-card">
+          <div class="phase-header ${meta.cls}">
+            <span>${meta.name}</span>
+            <span class="phase-time">⏱️ ${duration.toFixed(1)}ms</span>
+          </div>
+          <div class="phase-body">${this.renderPhaseBody(p, key)}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  renderPhaseBody(phase, phaseKey) {
+    if (!phase) return '<div style="color:#8c8c8c;font-size:12px;">无数据</div>';
+
+    const html = [];
+
+    if (phaseKey === 'event_collection' || phaseKey === 'event_collection_eval') {
+      const evals = phase.eventEvaluations || phase.evaluations || phase.events || [];
+      if (evals.length) {
+        evals.forEach(ev => {
+          const pass = ev.matched || ev.passed || ev.result === true;
+          html.push(`
+            <div class="event-eval-item ${pass ? 'pass' : 'fail'}">
+              <div class="item-title">
+                <span>${escapeHtml(ev.eventName || ev.name || 'Event')}</span>
+                <span class="item-badge ${pass ? 'pass' : 'fail'}">${pass ? '匹配' : '不匹配'}</span>
+              </div>
+              <div class="item-meta">触发事件: ${escapeHtml(ev.triggeredEvent || '-')}</div>
+              ${ev.details ? `<div class="item-detail">${escapeHtml(typeof ev.details === 'string' ? ev.details : JSON.stringify(ev.details))}</div>` : ''}
+            </div>
+          `);
+        });
+      }
+    }
+
+    if (phaseKey === 'guards' || phaseKey === 'guards_evaluation') {
+      const candidates = phase.candidateTransitions || phase.transitions || [];
+      if (candidates.length) {
+        candidates.forEach(ct => {
+          const eligible = ct.eligible || ct.result === 'eligible';
+          const selected = ct.selected || ct.isSelected;
+          const cls = selected ? 'selected' : (eligible ? 'eligible' : 'not-eligible');
+          const badge = selected ? '已选择' : (eligible ? '候选' : '未通过');
+          html.push(`
+            <div class="candidate-transition ${cls}">
+              <div class="item-title">
+                <span>${escapeHtml(ct.sourceState || '')} → ${escapeHtml(ct.targetState || '')} <span style="color:#8c8c8c;font-weight:normal;">[${escapeHtml(ct.transitionName || ct.transitionId || '')}]</span></span>
+                <span class="item-badge ${selected ? 'selected' : (eligible ? 'eligible' : 'not-eligible')}">${badge}</span>
+              </div>
+              <div class="item-meta">⏱️ ${(ct.durationMs || 0).toFixed(1)}ms · 优先级: ${ct.priority ?? '-'}</div>
+              ${(ct.guards || []).map(g => `
+                <div class="guard-item ${g.passed || g.result ? 'pass' : 'fail'}" style="margin-left:8px;margin-top:6px;">
+                  <div class="item-title">
+                    <span>🛡️ ${escapeHtml(g.expression || g.condition || g.name || 'Guard')}</span>
+                    <span class="item-badge ${g.passed || g.result ? 'pass' : 'fail'}">${g.passed || g.result ? '通过' : '不通过'}</span>
+                  </div>
+                  <div class="item-meta">⏱️ ${(g.durationMs || 0).toFixed(1)}ms</div>
+                  ${g.error ? `<div class="item-detail" style="color:#cf1322;">⚠️ ${escapeHtml(g.error)}</div>` : ''}
+                </div>
+              `).join('')}
+            </div>
+          `);
+        });
+      }
+    }
+
+    if (phaseKey === 'compliance' || phaseKey === 'compliance_check') {
+      const policies = phase.policies || phase.results || [];
+      if (policies.length) {
+        policies.forEach(p => {
+          const pass = p.passed || p.result === 'pass' || p.result === true;
+          html.push(`
+            <div class="policy-item ${pass ? 'pass' : 'block'}">
+              <div class="item-title">
+                <span>📜 ${escapeHtml(p.policyName || p.name || p.policyId || 'Policy')}</span>
+                <span class="item-badge ${pass ? 'pass' : 'block'}">${pass ? '放行' : '拦截'}</span>
+              </div>
+              <div class="item-meta">⏱️ ${(p.durationMs || 0).toFixed(1)}ms · 级别: ${escapeHtml(p.severity || p.level || '-')}</div>
+              ${p.details || p.reason ? `<div class="item-detail">${escapeHtml(p.details || p.reason || '')}</div>` : ''}
+            </div>
+          `);
+        });
+      }
+    }
+
+    if (phaseKey === 'selection' || phaseKey === 'conflict_resolution') {
+      const sel = phase.selection || phase.selectedTransition || phase;
+      if (sel && (sel.targetState || sel.transitionId || sel.transitionName)) {
+        html.push(`
+          <div class="selection-item">
+            <div class="item-title">
+              <span>🎯 选中: ${escapeHtml(sel.sourceState || '-')} → ${escapeHtml(sel.targetState || '-')}</span>
+              <span class="item-badge selected">执行</span>
+            </div>
+            <div class="item-meta">转换: ${escapeHtml(sel.transitionName || sel.transitionId || '-')} · 策略: ${escapeHtml(sel.selectionStrategy || phase.selectionStrategy || 'default')}</div>
+          </div>
+        `);
+      }
+    }
+
+    if (phaseKey === 'execution' || phaseKey === 'transition_execution') {
+      html.push(`
+        <div class="execution-detail">
+          <div><strong>执行转换:</strong> ${escapeHtml(phase.transitionName || phase.transitionId || phase.executedTransition || '-')}</div>
+          <div class="execution-state">🏁 ${escapeHtml(phase.newState || phase.targetState || '无状态变更')}</div>
+          ${(phase.sideEffects && phase.sideEffects.length) ? `
+            <div class="execution-side-effects">
+              <strong>副作用:</strong><br/>
+              ${phase.sideEffects.map(se => `• ${escapeHtml(JSON.stringify(se))}`).join('<br/>')}
+            </div>
+          ` : ''}
+          ${phase.error ? `<div class="item-detail" style="color:#cf1322;">❌ 错误: ${escapeHtml(phase.error)}</div>` : ''}
+        </div>
+      `);
+    }
+
+    return html.join('') || '<div style="color:#8c8c8c;font-size:12px;">无详细内容</div>';
+  }
+
+  addToCompare(side, traceId) {
+    if (side === 'A') this.compareA = traceId;
+    if (side === 'B') this.compareB = traceId;
+    this.switchTab('trace-compare');
+    const selA = document.getElementById('dt-compare-a');
+    const selB = document.getElementById('dt-compare-b');
+    if (this.compareA) selA.value = this.compareA;
+    if (this.compareB) selB.value = this.compareB;
+    this.onCompareSelect('a', selA.value);
+    this.onCompareSelect('b', selB.value);
+  }
+
+  populateCompareSelectors() {
+    const opts = ['<option value="">请选择 Trace</option>']
+      .concat(this.allTraces.slice(0, 50).map(t => {
+        const label = `${t.id.slice(0,8)} | ${t.eventName} | ${t.sourceState}→${t.targetState || t.decisionResult}`;
+        return `<option value="${t.id}">${escapeHtml(label)}</option>`;
+      })).join('');
+    document.getElementById('dt-compare-a').innerHTML = opts;
+    document.getElementById('dt-compare-b').innerHTML = opts;
+    if (this.compareA) document.getElementById('dt-compare-a').value = this.compareA;
+    if (this.compareB) document.getElementById('dt-compare-b').value = this.compareB;
+    this.onCompareSelect('a', this.compareA || '');
+    this.onCompareSelect('b', this.compareB || '');
+  }
+
+  onCompareSelect(side, value) {
+    if (side === 'a') this.compareA = value || null;
+    if (side === 'b') this.compareB = value || null;
+
+    const fillInfo = (infoBlockId, traceId) => {
+      const infoEl = document.getElementById(infoBlockId);
+      const t = this.allTraces.find(x => x.id === traceId);
+      if (!t) {
+        infoEl.classList.remove('has-info');
+        infoEl.textContent = '（未选择）';
+        return;
+      }
+      const resultIcon = t.decisionResult === 'accepted' ? '✅'
+        : t.decisionResult === 'rejected_compliance' ? '🚫' : '❌';
+      infoEl.classList.add('has-info');
+      infoEl.innerHTML = `
+        <div>${resultIcon} <strong>${escapeHtml(t.eventName)}</strong></div>
+        <div>${escapeHtml(t.sourceState)} → ${escapeHtml(t.targetState || t.decisionResult)}</div>
+        <div style="opacity:0.7;">⏱️ ${t.totalDurationMs?.toFixed(1) || 0}ms · ${this.formatTime(t.createdAt)}</div>
+      `;
+    };
+    fillInfo('dt-compare-a-info', this.compareA);
+    fillInfo('dt-compare-b-info', this.compareB);
+
+    const btn = document.getElementById('dt-btn-run-compare');
+    btn.disabled = !(this.compareA && this.compareB) || this.compareA === this.compareB;
+  }
+
+  async runCompare() {
+    if (!this.compareA || !this.compareB || this.compareA === this.compareB) return;
+    const btn = document.getElementById('dt-btn-run-compare');
+    btn.disabled = true;
+    btn.textContent = '⏳ 对比中...';
+    try {
+      const res = await fetch('/api/traces/compare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ traceIdA: this.compareA, traceIdB: this.compareB })
+      });
+      const result = await res.json();
+      this.currentCompareResult = result;
+      this.renderCompareSummary(result);
+      this.renderCompareDetail(result);
+    } catch (e) {
+      console.error('runCompare error:', e);
+      alert('对比失败: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '⚖️ 开始对比';
+    }
+  }
+
+  renderCompareSummary(result) {
+    const el = document.getElementById('dt-compare-summary');
+    el.style.display = 'block';
+    const hasDiff = result.hasDifferences ? '有差异' : '完全一致';
+    const diffIcon = result.hasDifferences ? '🔀' : '✅';
+    el.innerHTML = `
+      <div class="compare-summary-header">
+        <span class="compare-summary-title">${diffIcon} 对比结果: ${hasDiff}</span>
+      </div>
+      <div class="compare-summary-metrics">
+        <div class="compare-metric total">
+          <div class="compare-metric-value">${result.totalDifferences}</div>
+          <div class="compare-metric-label">总差异数</div>
+        </div>
+        <div class="compare-metric critical">
+          <div class="compare-metric-value">${result.criticalCount || 0}</div>
+          <div class="compare-metric-label">严重</div>
+        </div>
+        <div class="compare-metric high">
+          <div class="compare-metric-value">${result.highCount || 0}</div>
+          <div class="compare-metric-label">高</div>
+        </div>
+        <div class="compare-metric medium">
+          <div class="compare-metric-value">${result.mediumCount || 0}</div>
+          <div class="compare-metric-label">中</div>
+        </div>
+        <div class="compare-metric low">
+          <div class="compare-metric-value">${result.lowCount || 0}</div>
+          <div class="compare-metric-label">低</div>
+        </div>
+      </div>
+    `;
+  }
+
+  renderCompareDetail(result) {
+    const el = document.getElementById('dt-compare-detail');
+    const a = result.traceA;
+    const b = result.traceB;
+    const aIcon = a.decisionResult === 'accepted' ? '✅' : '❌';
+    const bIcon = b.decisionResult === 'accepted' ? '✅' : '❌';
+
+    let alignedHtml = '';
+    if (result.alignedPhases && result.alignedPhases.length) {
+      alignedHtml = result.alignedPhases.map(ap => {
+        const hasDiff = ap.hasDifference;
+        return `
+          <div class="aligned-phase ${hasDiff ? 'has-diff' : ''}">
+            <div class="aligned-phase-side a">
+              <div class="aligned-phase-name">
+                <span>${escapeHtml(ap.phaseName || ap.nameA || 'Phase')}</span>
+                <span class="aligned-phase-time">${(ap.durationA || 0).toFixed(1)}ms</span>
+              </div>
+              <div class="aligned-phase-content ${ap.phaseHasDiff ? 'has-diff' : ''}">
+                ${ap.summaryA || '(无)'}
+              </div>
+            </div>
+            <div class="aligned-phase-indicator ${hasDiff ? 'diff' : 'same'}">${hasDiff ? '≠' : '='}</div>
+            <div class="aligned-phase-side b">
+              <div class="aligned-phase-name">
+                <span>${escapeHtml(ap.phaseName || ap.nameB || 'Phase')}</span>
+                <span class="aligned-phase-time">${(ap.durationB || 0).toFixed(1)}ms</span>
+              </div>
+              <div class="aligned-phase-content ${ap.phaseHasDiff ? 'has-diff' : ''}">
+                ${ap.summaryB || '(无)'}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    let diffsHtml = '';
+    if (result.differences && result.differences.length) {
+      diffsHtml = `
+        <h4 style="margin:20px 0 12px;">🔎 差异点详情 (${result.differences.length})</h4>
+        ${result.differences.map(d => `
+          <div class="compare-diff-item">
+            <div class="diff-item-header ${d.level}">
+              <span class="diff-level-badge">${d.level.toUpperCase()}</span>
+              <span>${escapeHtml(d.message || d.type)}</span>
+              <span class="diff-item-path">${escapeHtml(d.path || '')}</span>
+            </div>
+            <div class="diff-item-body">
+              <div class="diff-side-by-side">
+                <div class="diff-side a">
+                  <div class="diff-side-title"><span>Trace A (基线)</span></div>
+                  <div class="diff-side-content compact">${escapeHtml(this.summarizeDiffValue(d.traceA))}</div>
+                </div>
+                <div class="diff-side b">
+                  <div class="diff-side-title"><span>Trace B (对比)</span></div>
+                  <div class="diff-side-content compact">${escapeHtml(this.summarizeDiffValue(d.traceB))}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      `;
+    } else {
+      diffsHtml = `
+        <div style="padding:40px; text-align:center; background:#f6ffed; border:1px solid #b7eb8f; border-radius:8px; margin-top:20px;">
+          <div style="font-size:36px; margin-bottom:8px;">🎉</div>
+          <div style="color:#237804; font-size:15px; font-weight:600;">两条 Trace 决策过程完全一致</div>
+        </div>
+      `;
+    }
+
+    el.innerHTML = `
+      <div class="compare-detail-header">
+        <div class="compare-header-side a">
+          <div class="compare-header-title">
+            <span>🅰️ ${aIcon} ${escapeHtml(a.eventName)}</span>
+            <span style="font-family:monospace;font-size:11px;">${a.id.slice(0,8)}</span>
+          </div>
+          <div class="compare-header-meta">
+            <div>结果: ${escapeHtml(a.decisionResult)}</div>
+            <div>目标: ${escapeHtml(a.targetState || '-')}</div>
+            <div>耗时: ${a.totalDurationMs?.toFixed(2) || 0}ms</div>
+            <div>${this.formatTime(a.createdAt)}</div>
+          </div>
+        </div>
+        <div class="compare-header-arrow">⚖️</div>
+        <div class="compare-header-side b">
+          <div class="compare-header-title">
+            <span>🅱️ ${bIcon} ${escapeHtml(b.eventName)}</span>
+            <span style="font-family:monospace;font-size:11px;">${b.id.slice(0,8)}</span>
+          </div>
+          <div class="compare-header-meta">
+            <div>结果: ${escapeHtml(b.decisionResult)}</div>
+            <div>目标: ${escapeHtml(b.targetState || '-')}</div>
+            <div>耗时: ${b.totalDurationMs?.toFixed(2) || 0}ms</div>
+            <div>${this.formatTime(b.createdAt)}</div>
+          </div>
+        </div>
+      </div>
+
+      ${alignedHtml ? `<h4 style="margin:0 0 10px;">📊 逐层对齐对比</h4><div class="compare-aligned-phases">${alignedHtml}</div>` : ''}
+      ${diffsHtml}
+    `;
+  }
+
+  summarizeDiffValue(v) {
+    if (v === undefined || v === null || v === '') return '(空/未定义)';
+    if (typeof v === 'object') {
+      try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+    }
+    return String(v);
+  }
+
+  async loadBottleneckStats() {
+    const params = new URLSearchParams();
+    const mId = document.getElementById('dt-bn-machine').value;
+    const range = document.getElementById('dt-bn-range').value;
+    if (mId) params.set('machineId', mId);
+    if (range) {
+      const now = Date.now();
+      let ms = 0;
+      if (range === '1h') ms = 3600 * 1000;
+      else if (range === '24h') ms = 24 * 3600 * 1000;
+      else if (range === '7d') ms = 7 * 24 * 3600 * 1000;
+      else if (range === '30d') ms = 30 * 24 * 3600 * 1000;
+      if (ms) {
+        params.set('startTime', new Date(now - ms).toISOString());
+        params.set('endTime', new Date(now).toISOString());
+      }
+    }
+
+    try {
+      const res = await fetch(`/api/traces/bottlenecks/stats?${params.toString()}`);
+      const data = await res.json();
+      this.renderBottleneckSummary(data);
+      this.renderBottleneckTable('dt-bn-transitions', data.topTransitions, 'transition');
+      this.renderBottleneckTable('dt-bn-guards', data.topGuards, 'guard');
+      this.renderBottleneckTable('dt-bn-policies', data.topPolicies, 'policy');
+    } catch (e) {
+      console.error('loadBottleneckStats error:', e);
+    }
+  }
+
+  renderBottleneckSummary(data) {
+    const el = document.getElementById('dt-bottleneck-summary');
+    const slowest = data.topTransitions?.[0] || data.topGuards?.[0] || {};
+    const slowestVal = slowest.avgDurationMs || 0;
+    el.innerHTML = `
+      <div class="bn-summary-card total-traces">
+        <div class="bn-summary-value">${data.totalTraces || 0}</div>
+        <div class="bn-summary-label">Trace 总数</div>
+      </div>
+      <div class="bn-summary-card total-transitions">
+        <div class="bn-summary-value">${data.uniqueTransitions || 0}</div>
+        <div class="bn-summary-label">不同转换数</div>
+      </div>
+      <div class="bn-summary-card total-guards">
+        <div class="bn-summary-value">${data.uniqueGuards || 0}</div>
+        <div class="bn-summary-label">不同守卫数</div>
+      </div>
+      <div class="bn-summary-card slowest-avg">
+        <div class="bn-summary-value">${slowestVal.toFixed(1)}<span style="font-size:13px;color:#8c8c8c;">ms</span></div>
+        <div class="bn-summary-label">最慢项平均耗时</div>
+      </div>
+    `;
+  }
+
+  renderBottleneckTable(containerId, items, type) {
+    const el = document.getElementById(containerId);
+    if (!items || !items.length) {
+      el.innerHTML = `<div class="bn-empty">暂无数据</div>`;
+      return;
+    }
+    const maxAvg = Math.max(...items.map(i => i.avgDurationMs || 0), 1);
+
+    const nameCol = type === 'transition' ? '转换名称' : type === 'guard' ? '守卫表达式' : '策略名称';
+
+    el.innerHTML = `
+      <table class="bn-table">
+        <thead>
+          <tr>
+            <th style="width:40px;">#</th>
+            <th>${nameCol}</th>
+            <th style="width:80px;">调用次数</th>
+            <th style="width:130px;">平均耗时</th>
+            <th style="width:120px;">最大耗时</th>
+            <th style="width:120px;">P95 耗时</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((item, idx) => {
+            const rank = idx + 1;
+            const pct = Math.min(100, ((item.avgDurationMs || 0) / maxAvg) * 100);
+            const name = item.transitionName || item.transitionId || item.guardExpression || item.expression || item.policyName || item.policyId || '-';
+            const isHot = (item.avgDurationMs || 0) >= 50;
+            return `
+              <tr>
+                <td><span class="bn-rank rank-${rank}">${rank}</span></td>
+                <td>
+                  <div class="bn-name">${escapeHtml(String(name).length > 100 ? String(name).slice(0, 100) + '...' : name)}</div>
+                  ${item.machineName ? `<div class="bn-machine-tag">🏷️ ${escapeHtml(item.machineName)}</div>` : ''}
+                </td>
+                <td><strong>${item.callCount ?? '-'}</strong></td>
+                <td>
+                  <span class="${isHot ? 'bn-time-highlight' : 'bn-time-value'}">${(item.avgDurationMs || 0).toFixed(2)}</span>
+                  <span class="bn-time-unit">ms</span>
+                  <div class="bn-bar"><div class="bn-bar-fill" style="width:${pct.toFixed(1)}%;"></div></div>
+                </td>
+                <td>
+                  <span class="bn-time-value">${(item.maxDurationMs || 0).toFixed(2)}</span>
+                  <span class="bn-time-unit">ms</span>
+                </td>
+                <td>
+                  <span class="bn-time-value">${(item.p95DurationMs || item.p95 || 0).toFixed(2)}</span>
+                  <span class="bn-time-unit">ms</span>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  formatTime(ts) {
+    if (!ts) return '-';
+    try {
+      const d = new Date(ts);
+      return d.toLocaleString('zh-CN', { hour12: false });
+    } catch {
+      return String(ts);
+    }
+  }
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   window.app = new WorkflowApp();
   window.simulationLab = new SimulationLab();
+  window.decisionTraceUI = new DecisionTraceUI();
 });
